@@ -27,11 +27,23 @@ const CALL_QUALITY_PRESETS = {
   "2160p": { width: 3840, height: 2160 },
 };
 
-const ICE_SERVERS = [
+let ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
   { urls: "stun:global.stun.twilio.com:3478" },
 ];
+
+// TURN с сервера (если настроен в окружении) — нужен, когда оба за строгим NAT
+async function loadIceServers() {
+  try {
+    const data = await api("/api/ice");
+    if (data && Array.isArray(data.iceServers) && data.iceServers.length) {
+      ICE_SERVERS = data.iceServers;
+    }
+  } catch (err) {
+    // остаёмся на STUN — звонок всё равно может установиться
+  }
+}
 
 const call = {
   active: false,
@@ -246,6 +258,7 @@ async function startCall(options = {}) {
   if (state.user && target === state.user.username) return;
 
   loadCallSettings();
+  if (!ICE_SERVERS.length || ICE_SERVERS.length < 4) loadIceServers();
   const wantsVideo = options.video !== false;
   const wantsScreen = !!options.screen;
 
@@ -295,6 +308,7 @@ async function acceptIncomingCall() {
   $("incoming-call").classList.remove("active");
 
   loadCallSettings();
+  loadIceServers();
   resetCallState();
   call.active = true;
   call.isCaller = false;

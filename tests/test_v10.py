@@ -25,6 +25,39 @@ async def scenario(base: str, ws_url: str):
 
         ta, tb, tc = alice["token"], bob["token"], carol["token"]
 
+        # ---------- PWA: манифест, service worker, офлайн-страница ----------
+        r = c.get("/manifest.webmanifest")
+        assert r.status_code == 200, r.text
+        assert r.headers["content-type"].startswith("application/manifest+json")
+        manifest = r.json()
+        assert manifest["short_name"] == "СвапТайм"
+        assert manifest["display"] == "standalone"
+        sizes = {icon["sizes"] for icon in manifest["icons"]}
+        assert "192x192" in sizes and "512x512" in sizes, sizes
+        assert any(icon.get("purpose") == "maskable" for icon in manifest["icons"])
+
+        r = c.get("/sw.js")
+        assert r.status_code == 200
+        assert "application/javascript" in r.headers["content-type"]
+        assert r.headers.get("service-worker-allowed") == "/"
+        assert "addEventListener(\"fetch\"" in r.text
+
+        assert c.get("/offline.html").status_code == 200
+        page = c.get("/").text
+        assert 'rel="manifest"' in page
+        assert "apple-touch-icon" in page
+        assert "/static/pwa.js" in page
+        for icon in ["icon-192.png", "icon-512.png", "icon-maskable-512.png", "apple-touch-icon.png"]:
+            assert c.get(f"/static/icons/{icon}").status_code == 200, icon
+
+        # ---------- ICE-серверы для звонков ----------
+        anon_ice = httpx.Client(base_url=base, timeout=10)
+        assert anon_ice.get("/api/ice").status_code == 401
+        anon_ice.close()
+        ice = c.get("/api/ice", headers=auth(ta)).json()
+        assert ice["turn"] is False
+        assert any("stun:" in str(s["urls"]) for s in ice["iceServers"])
+
         # ---------- темы ----------
         me = c.get("/api/me", headers=auth(ta)).json()
         assert len(me["themes"]) == 10, me["themes"]

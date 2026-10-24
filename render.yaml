@@ -1,0 +1,27 @@
+# Blueprint для Render.com: «New +» → «Blueprint» → выбрать этот репозиторий.
+# Бесплатного веб-сервиса хватает для проверки; диск (disk) нужен, чтобы база
+# не пропадала при перезапуске (на free-плане диск недоступен — база сбросится).
+services:
+  - type: web
+    name: swaptime
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m uvicorn backend.server:app --host 0.0.0.0 --port $PORT --ws-ping-interval 20 --ws-ping-timeout 20
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.6"
+      - key: SWAPTIME_DB
+        value: /var/data/swaptime.db
+      # TURN для звонков за строгим NAT (необязательно)
+      # - key: SWAPTIME_TURN_URL
+      #   value: turn:turn.example.com:3478
+      # - key: SWAPTIME_TURN_USER
+      #   value: user
+      # - key: SWAPTIME_TURN_PASS
+      #   sync: false
+    disk:
+      name: swaptime-data
+      mountPath: /var/data
+      sizeGB: 1
