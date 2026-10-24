@@ -1672,7 +1672,10 @@ body.on-chat { overflow: hidden; }
 }
 
 @media (hover: none) {
-    .message-actions { opacity: 1; pointer-events: auto; }
+    /* на тач-экранах действия показываем по тапу по сообщению, а не у всех сразу */
+    .message-actions { opacity: 0; pointer-events: none; }
+    .message-wrapper.show-actions .message-actions { opacity: 1; pointer-events: auto; }
+    .message-wrapper.show-actions { background: var(--hover); }
     .friend-actions { opacity: 1; }
     .msg-gutter { display: block; }
 }

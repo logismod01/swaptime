@@ -2687,6 +2687,17 @@ function bindEvents() {
   });
   input.addEventListener("input", sendTyping);
 
+  // тач-экраны: кнопки сообщения появляются по тапу
+  document.addEventListener("click", (event) => {
+    if (!window.matchMedia("(hover: none)").matches) return;
+    const wrapper = event.target.closest(".message-wrapper");
+    document.querySelectorAll(".message-wrapper.show-actions").forEach((node) => {
+      if (node !== wrapper) node.classList.remove("show-actions");
+    });
+    if (!wrapper || event.target.closest(".msg-btn, .reply-quote")) return;
+    wrapper.classList.toggle("show-actions");
+  });
+
   $("search-users").addEventListener("input", () => {
     if (state.view === "friends") renderFriendsPanel();
     else if (state.view === "tg" && typeof renderTgList === "function") renderTgList();
