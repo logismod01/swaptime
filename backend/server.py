@@ -18,6 +18,7 @@ import json
 import time
 import sqlite3
 import hashlib
+import base64
 import secrets
 from pathlib import Path
 from typing import Dict, Optional, Set
@@ -49,6 +50,25 @@ HISTORY_LIMIT = 200
 USERNAME_RE = re.compile(r"^[a-z0-9_]{3,20}$")
 COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 FONT_RE = re.compile(r"^[A-Za-z0-9 ,'\-]{1,80}$")
+
+FRAMES = [
+    "none",
+    "crimson",
+    "gold",
+    "neon",
+    "aurora",
+    "fire",
+    "ice",
+    "galaxy",
+    "rainbow",
+    "mono",
+]
+
+BANNERS = ["crimson", "sunset", "ocean", "forest", "galaxy", "night", "mono"]
+
+MAX_AVATAR_CHARS = 420_000  # ~300 КБ картинки в base64
+AVATAR_RE = re.compile(r"^data:image/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=\s]+$")
+BIO_MAX = 190
 
 FONTS = [
     "Inter, sans-serif",
@@ -93,6 +113,10 @@ def init_db() -> None:
             display_name TEXT,
             avatar_color TEXT DEFAULT '#e53935',
             font_family TEXT DEFAULT 'Inter, sans-serif',
+            avatar TEXT DEFAULT '',
+            avatar_frame TEXT DEFAULT 'none',
+            banner TEXT DEFAULT 'crimson',
+            bio TEXT DEFAULT '',
             last_seen INTEGER DEFAULT 0,
             created_at INTEGER NOT NULL
         )
@@ -164,6 +188,10 @@ def init_db() -> None:
 
     # мягкие миграции старых баз
     _add_column(c, "users", "last_seen", "INTEGER DEFAULT 0")
+    _add_column(c, "users", "avatar", "TEXT DEFAULT ''")
+    _add_column(c, "users", "avatar_frame", "TEXT DEFAULT 'none'")
+    _add_column(c, "users", "banner", "TEXT DEFAULT 'crimson'")
+    _add_column(c, "users", "bio", "TEXT DEFAULT ''")
     _add_column(c, "messages", "client_id", "TEXT")
 
     c.execute("CREATE INDEX IF NOT EXISTS idx_msg_pair ON messages(from_user, to_user, id)")
@@ -221,23 +249,60 @@ def normalize_font(font: str) -> str:
 # ============================================
 # ПОЛЬЗОВАТЕЛИ / СЕССИИ
 # ============================================
+def avatar_version(data: str) -> str:
+    """Короткий хеш аватарки — попадает в URL, чтобы сбросить кеш браузера."""
+    if not data:
+        return ""
+    return hashlib.md5(data.encode()).hexdigest()[:10]
+
+
 def get_user(username: str) -> Optional[dict]:
     conn = db_connect()
     row = conn.execute(
-        "SELECT id, username, display_name, avatar_color, font_family, last_seen "
+        "SELECT id, username, display_name, avatar_color, font_family, last_seen, "
+        "avatar, avatar_frame, banner, bio, created_at "
         "FROM users WHERE username = ?",
         (username,),
     ).fetchone()
     conn.close()
     if not row:
         return None
+    avatar = row["avatar"] or ""
     return {
         "id": row["id"],
         "username": row["username"],
         "display_name": row["display_name"] or row["username"],
         "avatar_color": row["avatar_color"] or "#e53935",
+        "avatar": avatar,
+        "avatar_ver": avatar_version(avatar),
+        "avatar_frame": row["avatar_frame"] or "none",
+        "banner": row["banner"] or "crimson",
+        "bio": row["bio"] or "",
         "font_family": normalize_font(row["font_family"] or FONTS[0]),
         "last_seen": row["last_seen"] or 0,
+        "created_at": row["created_at"] or 0,
+    }
+
+
+def client_user(user: Optional[dict]) -> Optional[dict]:
+    """Пользователь без тяжёлой base64-картинки — её отдаёт /api/avatar."""
+    if not user:
+        return None
+    data = dict(user)
+    data.pop("avatar", None)
+    data["has_avatar"] = bool(user.get("avatar"))
+    return data
+
+
+def short_profile(user: dict) -> dict:
+    """Компактная карточка для списков (чаты, друзья, заявки)."""
+    return {
+        "username": user["username"],
+        "display_name": user["display_name"],
+        "avatar_color": user["avatar_color"],
+        "avatar_ver": user["avatar_ver"],
+        "avatar_frame": user["avatar_frame"],
+        "online": user["username"] in active_connections,
     }
 
 
@@ -328,9 +393,16 @@ class FriendRequest(BaseModel):
 
 
 class UpdateProfile(BaseModel):
-    display_name: str = ""
-    avatar_color: str = "#e53935"
-    font_family: str = FONTS[0]
+    display_name: Optional[str] = None
+    avatar_color: Optional[str] = None
+    font_family: Optional[str] = None
+    avatar_frame: Optional[str] = None
+    banner: Optional[str] = None
+    bio: Optional[str] = None
+
+
+class AvatarPayload(BaseModel):
+    avatar: str = ""
 
 
 class MessageAction(BaseModel):
@@ -570,7 +642,7 @@ async def register(data: RegisterData, response: Response):
 
     token = create_session(username)
     set_session_cookie(response, token)
-    return {"ok": True, "token": token, "user": get_user(username)}
+    return {"ok": True, "token": token, "user": client_user(get_user(username))}
 
 
 @app.post("/api/login")
@@ -596,7 +668,7 @@ async def login(data: LoginData, response: Response):
 
     token = create_session(username)
     set_session_cookie(response, token)
-    return {"ok": True, "token": token, "user": get_user(username)}
+    return {"ok": True, "token": token, "user": client_user(get_user(username))}
 
 
 @app.post("/api/logout")
@@ -621,34 +693,136 @@ async def logout(
 
 @app.get("/api/me")
 async def me(user: str = Depends(auth_user)):
-    data = get_user(user)
+    data = client_user(get_user(user))
     if not data:
         raise HTTPException(401, "Юзер не найден")
     data["online"] = True
-    return {"user": data, "fonts": FONTS}
+    return {
+        "user": data,
+        "fonts": FONTS,
+        "frames": FRAMES,
+        "banners": BANNERS,
+    }
+
+
+def _apply_profile_update(user: str, data: UpdateProfile) -> dict:
+    current = get_user(user)
+    if not current:
+        raise HTTPException(401, "Юзер не найден")
+
+    display_name = current["display_name"]
+    if data.display_name is not None:
+        display_name = (data.display_name or "").strip()[:40] or user
+
+    color = current["avatar_color"]
+    if data.avatar_color is not None:
+        color = data.avatar_color if COLOR_RE.match(data.avatar_color) else "#e53935"
+
+    font = current["font_family"]
+    if data.font_family is not None:
+        font = normalize_font(data.font_family) if FONT_RE.match(data.font_family) else FONTS[0]
+
+    frame = current["avatar_frame"]
+    if data.avatar_frame is not None:
+        frame = data.avatar_frame if data.avatar_frame in FRAMES else "none"
+
+    banner = current["banner"]
+    if data.banner is not None:
+        banner = data.banner if data.banner in BANNERS else "crimson"
+
+    bio = current["bio"]
+    if data.bio is not None:
+        bio = (data.bio or "").strip()[:BIO_MAX]
+
+    conn = db_connect()
+    conn.execute(
+        "UPDATE users SET display_name = ?, avatar_color = ?, font_family = ?, "
+        "avatar_frame = ?, banner = ?, bio = ? WHERE username = ?",
+        (display_name, color, font, frame, banner, bio, user),
+    )
+    conn.commit()
+    conn.close()
+    return get_user(user)
 
 
 @app.post("/api/update_profile")
 async def update_profile(data: UpdateProfile, user: str = Depends(auth_user)):
-    display_name = (data.display_name or "").strip()[:40] or user
-    color = data.avatar_color if COLOR_RE.match(data.avatar_color or "") else "#e53935"
-    font = normalize_font(data.font_family) if FONT_RE.match(data.font_family or "") else FONTS[0]
+    updated = _apply_profile_update(user, data)
+    await broadcast_profile(user, updated)
+    return {"ok": True, "user": client_user(updated)}
+
+
+@app.post("/api/avatar")
+async def set_avatar(payload: AvatarPayload, user: str = Depends(auth_user)):
+    """Аватарка приходит уже обрезанной квадратом на клиенте (≤ 300 КБ)."""
+    raw = (payload.avatar or "").strip()
+
+    if raw:
+        if len(raw) > MAX_AVATAR_CHARS:
+            raise HTTPException(413, "Аватарка слишком большая (макс. 300 КБ)")
+        if not AVATAR_RE.match(raw):
+            raise HTTPException(400, "Поддерживаются только PNG, JPEG, WEBP и GIF")
 
     conn = db_connect()
-    conn.execute(
-        "UPDATE users SET display_name = ?, avatar_color = ?, font_family = ? WHERE username = ?",
-        (display_name, color, font, user),
-    )
+    conn.execute("UPDATE users SET avatar = ? WHERE username = ?", (raw, user))
     conn.commit()
     conn.close()
 
     updated = get_user(user)
-    await broadcast_to_friends(user, {"type": "profile_updated", "user": {
-        "username": user,
-        "display_name": updated["display_name"],
-        "avatar_color": updated["avatar_color"],
-    }})
-    return {"ok": True, "user": updated}
+    await broadcast_profile(user, updated)
+    return {"ok": True, "user": client_user(updated)}
+
+
+@app.get("/api/avatar/{username}")
+async def get_avatar(username: str, v: Optional[str] = None):  # noqa: ARG001
+    username = username.strip().lower()
+    conn = db_connect()
+    row = conn.execute("SELECT avatar FROM users WHERE username = ?", (username,)).fetchone()
+    conn.close()
+
+    if not row or not row["avatar"]:
+        raise HTTPException(404, "Нет аватарки")
+
+    match = re.match(r"^data:(image/[a-zA-Z0-9.+-]+);base64,(.+)$", row["avatar"], re.S)
+    if not match:
+        raise HTTPException(404, "Нет аватарки")
+    media_type, b64 = match.group(1), match.group(2)
+    try:
+        content = base64.b64decode(b64)
+    except Exception:
+        raise HTTPException(404, "Аватарка повреждена")
+
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "ETag": '"' + avatar_version(row["avatar"]) + '"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.get("/api/profile/{username}")
+async def get_profile(username: str, viewer: str = Depends(auth_user)):
+    username = username.strip().lower()
+    user = get_user(username)
+    if not user:
+        raise HTTPException(404, "Юзер не найден")
+
+    payload = short_profile(user)
+    payload.update({
+        "bio": user["bio"],
+        "banner": user["banner"],
+        "created_at": user["created_at"],
+        "last_seen": user["last_seen"],
+        "is_friend": are_friends(viewer, username),
+        "is_me": viewer == username,
+        "blocked_by_me": username in block_list(viewer),
+        "blocked_me": blocked_by(viewer, username),
+        "ignored_by_me": username in ignore_list(viewer),
+    })
+    return payload
 
 
 # ============================================
@@ -660,6 +834,8 @@ async def get_settings(user: str = Depends(auth_user)):
         "blocked": block_list(user),
         "ignored": ignore_list(user),
         "fonts": FONTS,
+        "frames": FRAMES,
+        "banners": BANNERS,
     }
 
 
@@ -727,14 +903,10 @@ async def get_chats(user: str = Depends(auth_user)):
         last_msg = None
         if last:
             last_msg = message_dict(last, _replies_map(conn, [last["reply_to"]]))
-        friends.append({
-            "username": name,
-            "display_name": info["display_name"],
-            "avatar_color": info["avatar_color"],
-            "online": name in active_connections,
-            "unread": unread.get(name, 0),
-            "last_message": last_msg,
-        })
+        entry = short_profile(info)
+        entry["unread"] = unread.get(name, 0)
+        entry["last_message"] = last_msg
+        friends.append(entry)
     conn.close()
 
     def sort_key(item):
@@ -815,12 +987,7 @@ def _friends_payload(user: str) -> dict:
         other = r["user2"] if r["user1"] == user else r["user1"]
         info = get_user(other)
         if info:
-            friends.append({
-                "username": other,
-                "display_name": info["display_name"],
-                "avatar_color": info["avatar_color"],
-                "online": other in active_connections,
-            })
+            friends.append(short_profile(info))
 
     req_rows = conn.execute(
         "SELECT user1 FROM friends WHERE user2 = ? AND status = 'pending'", (user,)
@@ -829,11 +996,7 @@ def _friends_payload(user: str) -> dict:
     for r in req_rows:
         info = get_user(r["user1"])
         if info:
-            incoming.append({
-                "username": info["username"],
-                "display_name": info["display_name"],
-                "avatar_color": info["avatar_color"],
-            })
+            incoming.append(short_profile(info))
 
     out_rows = conn.execute(
         "SELECT user2 FROM friends WHERE user1 = ? AND status = 'pending'", (user,)
@@ -847,6 +1010,8 @@ def _friends_payload(user: str) -> dict:
         "outgoing": outgoing,
         "blocked": block_list(user),
         "ignored": ignore_list(user),
+        "blocked_users": [short_profile(u) for u in map(get_user, block_list(user)) if u],
+        "ignored_users": [short_profile(u) for u in map(get_user, ignore_list(user)) if u],
     }
 
 
@@ -1047,6 +1212,24 @@ async def _broadcast_message_update(msg: Optional[dict]) -> None:
     payload = {"type": "message_updated", **msg}
     await send_to_user(msg["from"], payload)
     await send_to_user(msg["to"], payload)
+
+
+async def broadcast_profile(username: str, user: dict) -> None:
+    """Сообщаем друзьям и всем вкладкам самого пользователя."""
+    payload = {
+        "type": "profile_updated",
+        "user": {
+            "username": username,
+            "display_name": user["display_name"],
+            "avatar_color": user["avatar_color"],
+            "avatar_ver": user["avatar_ver"],
+            "avatar_frame": user["avatar_frame"],
+            "banner": user["banner"],
+            "bio": user["bio"],
+        },
+    }
+    await broadcast_to_friends(username, payload)
+    await send_to_user(username, payload)
 
 
 async def _notify_friends_changed(a: str, b: str) -> None:

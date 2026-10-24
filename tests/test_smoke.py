@@ -103,6 +103,15 @@ async def wait_msg(ws, msg_type=None, timeout=4.0, skip=0):
     raise AssertionError(f"не дождались {msg_type}")
 
 
+async def wait_until(ws, msg_type, predicate, timeout=6.0, limit=60):
+    """Ждёт событие нужного типа, пока не совпадёт predicate (в очереди их может быть много)."""
+    for _ in range(limit):
+        data = await wait_msg(ws, msg_type, timeout=timeout)
+        if predicate(data):
+            return data
+    raise AssertionError(f"не дождались {msg_type} по условию")
+
+
 async def scenario(base: str, ws_url: str):
     with httpx.Client(base_url=base, timeout=10) as c:
         # ---------- регистрация ----------
@@ -253,6 +262,83 @@ async def scenario(base: str, ws_url: str):
                     raise AssertionError("игнорируемое сообщение дошло до bob")
                 except asyncio.TimeoutError:
                     pass
+
+            # ---------- аватарки, рамки, профиль ----------
+            me_data = c.get("/api/me", headers=auth(alice["token"])).json()
+            assert len(me_data["frames"]) == 10, me_data["frames"]
+            assert "crimson" in me_data["banners"]
+            assert me_data["user"]["has_avatar"] is False
+
+            png = (
+                "data:image/png;base64,"
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAF"
+                "AAH/q842iQAAAABJRU5ErkJggg=="
+            )
+            r = c.post("/api/avatar", json={"avatar": png}, headers=auth(alice["token"]))
+            assert r.status_code == 200, r.text
+            alice_avatar = r.json()["user"]
+            assert alice_avatar["has_avatar"] is True
+            assert len(alice_avatar["avatar_ver"]) == 10
+
+            # сам файл отдаётся с картинкой и кешем
+            av = c.get(f"/api/avatar/alice?v={alice_avatar['avatar_ver']}")
+            assert av.status_code == 200
+            assert av.headers["content-type"].startswith("image/png")
+            assert "immutable" in av.headers.get("cache-control", "")
+            assert av.content[:4] == b"\x89PNG"
+
+            # смена аватарки меняет версию (сброс кеша)
+            r = c.post("/api/avatar", json={"avatar": png + ""}, headers=auth(alice["token"]))
+            assert r.json()["user"]["avatar_ver"] == alice_avatar["avatar_ver"]
+
+            # не картинка — отказ
+            assert c.post("/api/avatar", json={"avatar": "data:text/html;base64,PHNjcmlwdD4="},
+                          headers=auth(alice["token"])).status_code == 400
+            # слишком большая — отказ
+            huge = "data:image/png;base64," + "A" * 500_000
+            assert c.post("/api/avatar", json={"avatar": huge},
+                          headers=auth(alice["token"])).status_code == 413
+
+            # удаление аватарки
+            r = c.post("/api/avatar", json={"avatar": ""}, headers=auth(alice["token"]))
+            assert r.json()["user"]["has_avatar"] is False
+            assert c.get("/api/avatar/alice").status_code == 404
+            assert c.get("/api/avatar/nobody").status_code == 404
+
+            # рамка, баннер и био
+            r = c.post("/api/update_profile", json={
+                "avatar_frame": "gold", "banner": "ocean", "bio": "Привет, я Алиса 👋",
+            }, headers=auth(alice["token"]))
+            assert r.status_code == 200, r.text
+            prof = r.json()["user"]
+            assert prof["avatar_frame"] == "gold"
+            assert prof["banner"] == "ocean"
+            assert prof["bio"].startswith("Привет")
+
+            # неизвестная рамка/баннер сбрасываются в дефолт
+            prof = c.post("/api/update_profile", json={"avatar_frame": "<script>", "banner": "xxx"},
+                          headers=auth(alice["token"])).json()["user"]
+            assert prof["avatar_frame"] == "none"
+            assert prof["banner"] == "crimson"
+
+            # изменение профиля доходит до друга по WS
+            c.post("/api/avatar", json={"avatar": png}, headers=auth(alice["token"]))
+            c.post("/api/update_profile", json={"avatar_frame": "neon", "bio": "новое био"},
+                   headers=auth(alice["token"]))
+            upd = await wait_until(
+                wb, "profile_updated", lambda m: m["user"].get("avatar_frame") == "neon"
+            )
+            assert upd["user"]["avatar_ver"], "в событии должна быть версия аватарки"
+            assert upd["user"]["bio"] == "новое био"
+
+            # публичная карточка профиля
+            card = c.get("/api/profile/alice", headers=auth(bob["token"])).json()
+            assert card["display_name"]
+            assert card["avatar_frame"] == "neon"
+            assert card["is_friend"] is True
+            assert card["is_me"] is False
+            assert card["created_at"] > 0
+            assert "avatar" not in card, "base64 не должен утекать в карточку"
 
             # ---------- блокировка ----------
             r = c.post("/api/friends/block", json={"to_user": "bob"}, headers=auth(alice["token"]))

@@ -2,16 +2,16 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>СвапТайм — Мессенджер</title>
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 
     <!-- 10 шрифтов для настроек -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=Roboto:wght@400;600;700&family=Montserrat:wght@400;600;700&family=Open+Sans:wght@400;600;700&family=Lato:wght@400;700&family=Poppins:wght@400;600;700&family=Raleway:wght@400;600;700&family=Nunito:wght@400;600;700;800&family=Merriweather:wght@400;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Roboto:wght@400;500;700&family=Montserrat:wght@400;600;700&family=Open+Sans:wght@400;600;700&family=Lato:wght@400;700&family=Poppins:wght@400;600;700&family=Raleway:wght@400;600;700&family=Nunito:wght@400;600;700;800&family=Merriweather:wght@400;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 
-    <link rel="stylesheet" href="/static/style.css?v=8">
+    <link rel="stylesheet" href="/static/style.css?v=9">
 </head>
 <body>
 
@@ -19,6 +19,7 @@
          ЭКРАН ВХОДА / РЕГИСТРАЦИИ
          ============================================ -->
     <div id="auth-screen" class="screen active">
+        <div class="auth-bg-glow"></div>
         <div class="auth-box">
             <div class="logo">
                 <span class="logo-icon">S</span>
@@ -33,19 +34,40 @@
                 <button class="auth-tab" data-tab="register">Регистрация</button>
             </div>
 
-            <form id="login-form" class="auth-form active" autocomplete="off" onsubmit="event.preventDefault(); doLogin();">
-                <input type="text" id="login-username" placeholder="Ник" autocomplete="username">
-                <input type="password" id="login-password" placeholder="Пароль" autocomplete="current-password">
+            <form id="login-form" class="auth-form active" autocomplete="off" novalidate>
+                <label class="field">
+                    <span class="field-label">Ник</span>
+                    <input type="text" id="login-username" placeholder="например, logismod" autocomplete="username">
+                </label>
+                <label class="field">
+                    <span class="field-label">Пароль</span>
+                    <input type="password" id="login-password" placeholder="••••••••" autocomplete="current-password">
+                </label>
                 <button class="btn-primary" type="submit" id="login-submit">Войти</button>
                 <div id="login-error" class="error"></div>
             </form>
 
-            <form id="register-form" class="auth-form" autocomplete="off" onsubmit="event.preventDefault(); doRegister();">
-                <input type="text" id="reg-username" placeholder="Ник (3–20 символов, латиница)" autocomplete="username">
-                <input type="text" id="reg-display-name" placeholder="Отображаемое имя" autocomplete="nickname">
-                <input type="email" id="reg-email" placeholder="Email" autocomplete="email">
-                <input type="password" id="reg-password" placeholder="Пароль (мин. 4 символа)" autocomplete="new-password">
-                <input type="password" id="reg-password-2" placeholder="Повтори пароль" autocomplete="new-password">
+            <form id="register-form" class="auth-form" autocomplete="off" novalidate>
+                <label class="field">
+                    <span class="field-label">Ник <em>3–20 символов, латиница</em></span>
+                    <input type="text" id="reg-username" placeholder="например, logismod" autocomplete="username">
+                </label>
+                <label class="field">
+                    <span class="field-label">Отображаемое имя</span>
+                    <input type="text" id="reg-display-name" placeholder="Как тебя звать?" autocomplete="nickname">
+                </label>
+                <label class="field">
+                    <span class="field-label">Email</span>
+                    <input type="email" id="reg-email" placeholder="you@mail.ru" autocomplete="email">
+                </label>
+                <label class="field">
+                    <span class="field-label">Пароль <em>минимум 4 символа</em></span>
+                    <input type="password" id="reg-password" placeholder="••••••••" autocomplete="new-password">
+                </label>
+                <label class="field">
+                    <span class="field-label">Повтори пароль</span>
+                    <input type="password" id="reg-password-2" placeholder="••••••••" autocomplete="new-password">
+                </label>
 
                 <div class="captcha-block">
                     <div class="captcha-question" id="captcha-question">Загрузка...</div>
@@ -59,90 +81,132 @@
     </div>
 
     <!-- ============================================
-         ЭКРАН ЧАТА
+         ОСНОВНОЕ ПРИЛОЖЕНИЕ
          ============================================ -->
     <div id="chat-screen" class="screen">
-        <div class="chat-layout">
+        <div class="app">
 
-            <!-- ЛЕВАЯ ПАНЕЛЬ -->
-            <aside class="sidebar" id="sidebar">
-                <div class="sidebar-header">
-                    <div class="user-info">
-                        <div class="avatar" id="my-avatar">?</div>
-                        <div class="user-info-text">
-                            <div class="user-name" id="my-name">—</div>
-                            <div class="user-status online">в сети</div>
-                        </div>
-                    </div>
-                    <div class="header-actions">
-                        <button class="icon-btn" onclick="openSettings()" title="Настройки" aria-label="Настройки">⚙</button>
-                        <button class="icon-btn" onclick="logout()" title="Выйти" aria-label="Выйти">⏻</button>
-                    </div>
+            <!-- РЕЙЛ -->
+            <nav class="rail">
+                <div class="rail-top">
+                    <button class="rail-btn rail-logo-btn active" data-view="chats" title="Личные сообщения">
+                        <span class="rail-emoji">💬</span>
+                        <span class="rail-badge" id="rail-unread" hidden></span>
+                    </button>
+                    <button class="rail-btn" data-view="friends" title="Друзья">
+                        <span class="rail-emoji">👥</span>
+                        <span class="rail-badge" id="rail-requests" hidden></span>
+                    </button>
+                    <div class="rail-sep"></div>
+                    <div class="rail-contacts" id="rail-contacts"></div>
                 </div>
+                <div class="rail-bottom">
+                    <button class="rail-btn rail-small" data-action="open-settings" title="Настройки" aria-label="Настройки">⚙</button>
+                    <button class="rail-btn rail-small" data-action="logout" title="Выйти" aria-label="Выйти">⏻</button>
+                </div>
+            </nav>
+
+            <!-- САЙДБАР -->
+            <aside class="sidebar">
+                <header class="sidebar-head">
+                    <span class="sidebar-title" id="sidebar-title">Личные сообщения</span>
+                    <span class="sidebar-tag">DM</span>
+                </header>
 
                 <div class="sidebar-search">
                     <input type="text" id="search-users" placeholder="Поиск по друзьям…" autocomplete="off">
-                    <button class="add-friend-btn" onclick="openAddFriend()">➕ Добавить друга</button>
                 </div>
 
-                <div id="requests-block" class="requests-block" style="display:none;">
-                    <div class="requests-title">📩 Запросы в друзья</div>
-                    <div id="requests-list"></div>
+                <div class="sidebar-scroll">
+                    <!-- вкладка «чаты» -->
+                    <div id="chats-view">
+                        <div id="requests-block" class="requests-block" style="display:none;">
+                            <div class="requests-title">📩 Запросы в друзья</div>
+                            <div id="requests-list"></div>
+                        </div>
+                        <div class="dm-list" id="users-list">
+                            <div class="loading-small">Загрузка…</div>
+                        </div>
+                        <button class="add-friend-btn" data-action="add-friend">＋ Добавить друга</button>
+                    </div>
+
+                    <!-- вкладка «друзья» -->
+                    <div id="friends-view" style="display:none;">
+                        <div class="friends-tabs" id="friends-tabs">
+                            <button class="ftab active" data-tab="all">Все</button>
+                            <button class="ftab" data-tab="online">Онлайн</button>
+                            <button class="ftab" data-tab="pending">Заявки</button>
+                            <button class="ftab" data-tab="blocked">Блок</button>
+                        </div>
+                        <div class="friends-list" id="friends-list"></div>
+                        <button class="add-friend-btn" data-action="add-friend">＋ Добавить друга</button>
+                    </div>
                 </div>
 
-                <div class="users-list" id="users-list">
-                    <div class="loading-small">Загрузка…</div>
-                </div>
+                <!-- МОЯ ПАНЕЛЬ -->
+                <footer class="me-bar">
+                    <button class="me-profile" data-action="my-profile" title="Мой профиль">
+                        <span class="av-slot" id="me-avatar-slot"></span>
+                        <span class="me-text">
+                            <span class="me-name" id="my-name">—</span>
+                            <span class="me-tag" id="my-tag">@—</span>
+                        </span>
+                    </button>
+                    <div class="me-actions">
+                        <button class="icon-btn" data-action="open-settings" title="Настройки">⚙</button>
+                        <button class="icon-btn" data-action="logout" title="Выйти">⏻</button>
+                    </div>
+                </footer>
             </aside>
 
-            <!-- ПРАВАЯ ПАНЕЛЬ -->
+            <!-- ОСНОВНАЯ ОБЛАСТЬ -->
             <main class="chat-area">
                 <div id="no-chat" class="no-chat">
-                    <div class="no-chat-icon">💬</div>
-                    <h2>Выбери, с кем поговорить</h2>
-                    <p>Слева — список друзей. Добавь кого-нибудь по нику!</p>
+                    <div class="no-chat-art">💬</div>
+                    <h2>Тут пока пусто</h2>
+                    <p>Выбери друга слева или добавь нового по нику.</p>
+                    <button class="btn-ghost" data-action="add-friend">＋ Добавить друга</button>
                 </div>
 
                 <div id="chat-active" class="chat-active" style="display:none;">
                     <header class="chat-header">
-                        <button class="icon-btn back-btn" onclick="closeChatMobile()" title="Назад" aria-label="Назад">←</button>
-                        <div class="avatar avatar-online-wrap" id="chat-avatar-wrap">
-                            <div class="avatar" id="chat-avatar">?</div>
-                            <span class="online-dot" id="chat-online-dot" style="display:none;"></span>
+                        <button class="icon-btn back-btn" data-action="close-chat" title="Назад" aria-label="Назад">←</button>
+                        <button class="chat-peer" data-action="chat-profile" title="Профиль">
+                            <span class="av-slot" id="chat-avatar-slot"></span>
+                            <span class="chat-peer-text">
+                                <span class="chat-name" id="chat-name">—</span>
+                                <span class="chat-status" id="chat-status">—</span>
+                            </span>
+                        </button>
+                        <div class="chat-header-actions">
+                            <button class="icon-btn" data-action="chat-profile" title="Профиль">👤</button>
                         </div>
-                        <div class="chat-header-info">
-                            <div class="chat-name" id="chat-name">—</div>
-                            <div class="chat-status" id="chat-status">—</div>
-                        </div>
-                        <button class="icon-btn" onclick="openChatProfile()" title="Профиль" aria-label="Профиль">⋯</button>
                     </header>
 
                     <div class="messages" id="messages"></div>
 
-                    <!-- Плашка «печатает…» -->
                     <div class="typing-line" id="typing-line" style="display:none;">печатает…</div>
 
-                    <!-- Плашка ответа -->
                     <div id="reply-box" class="composer-banner" style="display:none;">
                         <div class="composer-banner-body">
                             <div class="composer-banner-title">Ответ <span id="reply-author"></span></div>
                             <div class="composer-banner-text" id="reply-text"></div>
                         </div>
-                        <button class="banner-close" onclick="cancelReply()" aria-label="Отменить">✕</button>
+                        <button class="banner-close" data-action="cancel-reply" aria-label="Отменить">✕</button>
                     </div>
 
-                    <!-- Плашка редактирования -->
                     <div id="edit-box" class="composer-banner edit" style="display:none;">
                         <div class="composer-banner-body">
                             <div class="composer-banner-title">✏️ Редактирование</div>
                             <div class="composer-banner-text" id="edit-text"></div>
                         </div>
-                        <button class="banner-close" onclick="cancelEdit()" aria-label="Отменить">✕</button>
+                        <button class="banner-close" data-action="cancel-edit" aria-label="Отменить">✕</button>
                     </div>
 
                     <footer class="chat-input">
-                        <input type="text" id="message-input" placeholder="Напиши сообщение…" autocomplete="off" maxlength="4000">
-                        <button class="send-btn" id="send-btn" onclick="sendMessage()" aria-label="Отправить">➤</button>
+                        <button class="composer-plus" data-action="open-settings" title="Настройки">＋</button>
+                        <input type="text" id="message-input" placeholder="Написать в @…" autocomplete="off" maxlength="4000">
+                        <button class="send-btn" id="send-btn" aria-label="Отправить">➤</button>
                     </footer>
                 </div>
             </main>
@@ -155,37 +219,50 @@
     <div id="add-friend-modal" class="modal-overlay">
         <div class="modal-box">
             <h3>➕ Добавить друга</h3>
-            <input type="text" id="friend-username" placeholder="Введи ник друга" autocomplete="off">
+            <p class="modal-hint">Введи ник — человек получит заявку.</p>
+            <input type="text" id="friend-username" placeholder="ник друга" autocomplete="off">
             <div class="modal-actions">
-                <button class="modal-btn secondary" onclick="closeAddFriend()">Отмена</button>
-                <button class="modal-btn primary" onclick="sendFriendRequest()">Отправить</button>
+                <button class="modal-btn secondary" data-action="close-add-friend">Отмена</button>
+                <button class="modal-btn primary" data-action="send-friend-request">Отправить</button>
             </div>
             <div class="modal-error" id="friend-error"></div>
         </div>
     </div>
 
     <!-- ============================================
-         МОДАЛКА: ПРОФИЛЬ
+         МОДАЛКА: КАРТОЧКА ПРОФИЛЯ (как в Discord)
          ============================================ -->
     <div id="profile-modal" class="modal-overlay">
-        <div class="modal-box">
-            <h3 id="profile-title">Профиль</h3>
-            <div class="profile-info">
-                <div class="avatar profile-avatar" id="profile-avatar">?</div>
+        <div class="profile-card" id="profile-card">
+            <div class="profile-banner banner-crimson" id="profile-banner">
+                <button class="profile-close" data-action="close-profile" aria-label="Закрыть">✕</button>
+            </div>
+            <div class="profile-body">
+                <div class="profile-avatar-row">
+                    <span class="av-slot av-slot-xl" id="profile-avatar-slot"></span>
+                    <span class="profile-status" id="profile-status"></span>
+                </div>
                 <div class="profile-name" id="profile-name">—</div>
                 <div class="profile-username" id="profile-username">@—</div>
-                <div class="profile-status" id="profile-status"></div>
+
+                <div class="profile-section">
+                    <div class="profile-section-title">О себе</div>
+                    <div class="profile-bio" id="profile-bio">—</div>
+                </div>
+
+                <div class="profile-section">
+                    <div class="profile-section-title">В СвапТайме с</div>
+                    <div class="profile-meta" id="profile-since">—</div>
+                </div>
+
+                <div class="profile-actions">
+                    <button class="profile-btn write" id="profile-write-btn" data-action="write-to-user">💬 Написать</button>
+                    <button class="profile-btn ignore" id="profile-ignore-btn" data-action="toggle-ignore">🔇 Игнорировать</button>
+                    <button class="profile-btn block" id="profile-block-btn" data-action="toggle-block">🚫 Заблокировать</button>
+                    <button class="profile-btn remove" id="profile-remove-btn" data-action="remove-friend">🗑 Удалить из друзей</button>
+                </div>
+                <div class="modal-error" id="profile-error"></div>
             </div>
-            <div class="profile-actions">
-                <button class="profile-btn write" onclick="writeToUser()">💬 Написать</button>
-                <button class="profile-btn ignore" id="profile-ignore-btn" onclick="toggleIgnoreCurrentUser()">🔇 Игнорировать</button>
-                <button class="profile-btn block" id="profile-block-btn" onclick="toggleBlockCurrentUser()">🚫 Заблокировать</button>
-                <button class="profile-btn remove" id="profile-remove-btn" onclick="removeCurrentFriend()">🗑 Удалить из друзей</button>
-            </div>
-            <div class="modal-actions" style="margin-top:15px;">
-                <button class="modal-btn secondary" onclick="closeProfile()">Закрыть</button>
-            </div>
-            <div class="modal-error" id="profile-error"></div>
         </div>
     </div>
 
@@ -193,47 +270,106 @@
          МОДАЛКА: НАСТРОЙКИ
          ============================================ -->
     <div id="settings-modal" class="modal-overlay">
-        <div class="modal-box settings-box">
-            <h3>⚙ Настройки</h3>
+        <div class="settings-shell">
+            <nav class="settings-nav">
+                <div class="settings-nav-title">Настройки</div>
+                <button class="settings-tab active" data-tab="profile">👤 Мой профиль</button>
+                <button class="settings-tab" data-tab="appearance">🎨 Внешний вид</button>
+                <button class="settings-tab" data-tab="privacy">🛡 Приватность</button>
+                <div class="settings-nav-foot">
+                    <button class="modal-btn secondary" data-action="close-settings">Закрыть (Esc)</button>
+                </div>
+            </nav>
 
-            <div class="settings-section">
-                <div class="settings-label">Отображаемое имя</div>
-                <input type="text" id="settings-name" placeholder="Имя" maxlength="40">
-            </div>
+            <div class="settings-body">
+                <!-- ПРОФИЛЬ -->
+                <section class="settings-pane active" id="settings-tab-profile">
+                    <div class="settings-banner banner-crimson" id="settings-banner">
+                        <span class="av-slot av-slot-xl" id="settings-avatar-slot"></span>
+                    </div>
 
-            <div class="settings-section">
-                <div class="settings-label">Цвет аватарки</div>
-                <input type="color" id="settings-color">
-            </div>
+                    <div class="settings-row">
+                        <div class="settings-col">
+                            <div class="settings-label">Аватарка</div>
+                            <div class="settings-hint">Картинка обрежется по центру до квадрата.</div>
+                            <div class="avatar-controls">
+                                <button class="modal-btn primary" data-action="pick-avatar">Загрузить фото</button>
+                                <button class="modal-btn secondary" data-action="remove-avatar">Удалить</button>
+                                <input type="file" id="avatar-input" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+                            </div>
+                            <div class="modal-error" id="avatar-error"></div>
+                        </div>
+                    </div>
 
-            <div class="settings-section">
-                <div class="settings-label">Шрифт (10 вариантов)</div>
-                <select id="settings-font"></select>
-                <div class="font-preview" id="font-preview">Пример текста — СвапТайм 123</div>
-            </div>
+                    <div class="settings-section">
+                        <div class="settings-label">Рамка аватарки</div>
+                        <div class="frames-grid" id="frames-grid"></div>
+                    </div>
 
-            <div class="modal-actions" style="margin-bottom:20px;">
-                <button class="modal-btn secondary" onclick="closeSettings()">Отмена</button>
-                <button class="modal-btn primary" onclick="saveSettings()" id="settings-save">Сохранить</button>
-            </div>
+                    <div class="settings-section">
+                        <div class="settings-label">Баннер профиля</div>
+                        <div class="banners-grid" id="banners-grid"></div>
+                    </div>
 
-            <div class="settings-divider"></div>
+                    <div class="settings-section">
+                        <div class="settings-label">Отображаемое имя</div>
+                        <input type="text" id="settings-name" placeholder="Имя" maxlength="40">
+                    </div>
 
-            <div class="settings-section">
-                <div class="settings-label">🚫 Заблокированные</div>
-                <div id="blocked-list"><div class="loading-small">Пусто</div></div>
-            </div>
+                    <div class="settings-section">
+                        <div class="settings-label">О себе</div>
+                        <textarea id="settings-bio" class="settings-textarea" maxlength="190"
+                                  placeholder="Пара слов о себе…"></textarea>
+                        <div class="settings-hint"><span id="bio-counter">0</span>/190</div>
+                    </div>
 
-            <div class="settings-section">
-                <div class="settings-label">🔇 Игнорируемые</div>
-                <div id="ignored-list"><div class="loading-small">Пусто</div></div>
+                    <div class="settings-section">
+                        <div class="settings-label">Цвет аватарки <em>если нет фото</em></div>
+                        <div class="color-row">
+                            <input type="color" id="settings-color">
+                            <div class="color-presets" id="color-presets"></div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ВНЕШНИЙ ВИД -->
+                <section class="settings-pane" id="settings-tab-appearance">
+                    <div class="settings-section">
+                        <div class="settings-label">Шрифт интерфейса</div>
+                        <select id="settings-font"></select>
+                        <div class="font-preview" id="font-preview">Пример текста — СвапТайм 123</div>
+                    </div>
+                    <div class="settings-section">
+                        <div class="settings-label">Предпросмотр сообщений</div>
+                        <div class="preview-chat" id="font-preview-chat"></div>
+                    </div>
+                </section>
+
+                <!-- ПРИВАТНОСТЬ -->
+                <section class="settings-pane" id="settings-tab-privacy">
+                    <div class="settings-section">
+                        <div class="settings-label">🚫 Заблокированные</div>
+                        <div id="blocked-list"><div class="loading-small">Пусто</div></div>
+                    </div>
+                    <div class="settings-section">
+                        <div class="settings-label">🔇 Игнорируемые</div>
+                        <div id="ignored-list"><div class="loading-small">Пусто</div></div>
+                    </div>
+                </section>
+
+                <footer class="settings-foot">
+                    <div class="modal-error" id="settings-error"></div>
+                    <div class="settings-foot-actions">
+                        <button class="modal-btn secondary" data-action="close-settings">Отмена</button>
+                        <button class="modal-btn primary" id="settings-save">Сохранить</button>
+                    </div>
+                </footer>
             </div>
         </div>
     </div>
 
-    <!-- Тосты -->
     <div class="toast-container" id="toast-container"></div>
 
-    <script src="/static/script.js?v=8"></script>
+    <script src="/static/script.js?v=9"></script>
 </body>
 </html>
