@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>СвапТайм — Мессенджер</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+    <!-- ЭКРАН ЛОГИНА -->
+    <div id="auth-screen" class="screen active">
+        <div class="auth-box">
+            <div class="logo">
+                <span class="logo-icon">S</span>
+                <h1>СвапТайм</h1>
+            </div>
+            <div class="auth-tabs">
+                <button class="auth-tab active" data-tab="login">Вход</button>
+                <button class="auth-tab" data-tab="register">Регистрация</button>
+            </div>
+            <div id="login-form" class="auth-form active">
+                <input type="text" id="login-username" placeholder="Ник" autocomplete="off">
+                <input type="password" id="login-password" placeholder="Пароль">
+                <button class="btn-primary" onclick="doLogin()">Войти</button>
+                <div id="login-error" class="error"></div>
+            </div>
+            <div id="register-form" class="auth-form">
+                <input type="text" id="reg-username" placeholder="Ник (мин. 3 символа)" autocomplete="off">
+                <input type="text" id="reg-display-name" placeholder="Отображаемое имя" autocomplete="off">
+                <input type="email" id="reg-email" placeholder="Email" autocomplete="off">
+                <input type="password" id="reg-password" placeholder="Пароль (мин. 4 символа)">
+                <input type="password" id="reg-password-2" placeholder="Повтори пароль">
+                <div class="captcha-block">
+                    <div class="captcha-question" id="captcha-question">Загрузка...</div>
+                    <div class="captcha-options" id="captcha-options"></div>
+                </div>
+                <button class="btn-primary" onclick="doRegister()">Создать аккаунт</button>
+                <div id="register-error" class="error"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ЭКРАН ЧАТА -->
+    <div id="chat-screen" class="screen">
+        <div class="chat-layout">
+            <aside class="sidebar">
+                <div class="sidebar-header">
+                    <div class="user-info">
+                        <div class="avatar" id="my-avatar">?</div>
+                        <div>
+                            <div class="user-name" id="my-name">—</div>
+                            <div class="user-status">В сети</div>
+                        </div>
+                    </div>
+                    <div style="display:flex; gap:5px;">
+                        <button class="icon-btn" onclick="openSettings()" title="Настройки">⚙</button>
+                        <button class="icon-btn" onclick="logout()" title="Выйти">⏻</button>
+                    </div>
+                </div>
+                <div class="sidebar-search">
+                    <input type="text" id="search-users" placeholder="Поиск друзей...">
+                    <button class="add-friend-btn" onclick="openAddFriend()">➕ Добавить друга</button>
+                </div>
+                <div id="requests-block" class="requests-block" style="display:none;">
+                    <div class="requests-title">📩 Запросы в друзья</div>
+                    <div id="requests-list"></div>
+                </div>
+                <div class="users-list" id="users-list">
+                    <div class="loading-small">Загрузка...</div>
+                </div>
+            </aside>
+            <main class="chat-area">
+                <div id="no-chat" class="no-chat">
+                    <div class="no-chat-icon">💬</div>
+                    <h2>Выбери, с кем поговорить</h2>
+                    <p>Слева — список друзей</p>
+                </div>
+                <div id="chat-active" class="chat-active" style="display: none;">
+                    <header class="chat-header">
+                        <div class="avatar" id="chat-avatar">?</div>
+                        <div>
+                            <div class="chat-name" id="chat-name">—</div>
+                            <div class="chat-status" id="chat-status">—</div>
+                        </div>
+                    </header>
+                    <div class="messages" id="messages"></div>
+                    <!-- Окно ответа -->
+                    <div id="reply-box" style="display:none; padding:10px 20px; background:var(--bg-2); border-top:1px solid var(--border); font-size:13px; color:var(--text-dim); display:flex; justify-content:space-between; align-items:center;">
+                        <span id="reply-text"></span>
+                        <button onclick="cancelReply()" style="background:none; border:none; color:var(--red); cursor:pointer; font-size:16px;">✕</button>
+                    </div>
+                    <footer class="chat-input">
+                        <input type="text" id="message-input" placeholder="Напиши сообщение..." autocomplete="off">
+                        <button class="send-btn" onclick="sendMessage()">➤</button>
+                    </footer>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <!-- МОДАЛКА: ДОБАВИТЬ ДРУГА -->
+    <div id="add-friend-modal" class="modal-overlay">
+        <div class="modal-box">
+            <h3>➕ Добавить друга</h3>
+            <input type="text" id="friend-username" placeholder="Введи ник друга" autocomplete="off">
+            <div class="modal-actions">
+                <button class="modal-btn secondary" onclick="closeAddFriend()">Отмена</button>
+                <button class="modal-btn primary" onclick="sendFriendRequest()">Отправить</button>
+            </div>
+            <div class="modal-error" id="friend-error"></div>
+        </div>
+    </div>
+
+    <!-- МОДАЛКА: ПРОФИЛЬ -->
+    <div id="profile-modal" class="modal-overlay">
+        <div class="modal-box">
+            <h3 id="profile-title">Профиль</h3>
+            <div class="profile-info">
+                <div class="avatar" id="profile-avatar" style="width:60px;height:60px;font-size:24px;margin:0 auto 15px;">?</div>
+                <div class="profile-name" id="profile-name">—</div>
+                <div class="profile-username" id="profile-username">@—</div>
+            </div>
+            <div class="profile-actions">
+                <button class="profile-btn write" onclick="writeToUser()">💬 Написать</button>
+                <button class="profile-btn block" onclick="blockCurrentUser()">🚫 Заблокировать</button>
+                <button class="profile-btn ignore" onclick="ignoreCurrentUser()">🔇 Игнорировать</button>
+                <button class="profile-btn remove" onclick="removeCurrentFriend()">🗑 Удалить из друзей</button>
+            </div>
+            <div class="modal-actions" style="margin-top:15px;">
+                <button class="modal-btn secondary" onclick="closeProfile()">Закрыть</button>
+            </div>
+            <div class="modal-error" id="profile-error"></div>
+        </div>
+    </div>
+
+    <!-- МОДАЛКА: НАСТРОЙКИ -->
+    <div id="settings-modal" class="modal-overlay">
+        <div class="modal-box" style="max-height:90vh; overflow-y:auto;">
+            <h3>⚙ Настройки</h3>
+            
+            <div class="settings-section">
+                <div class="settings-label">Отображаемое имя</div>
+                <input type="text" id="settings-name" placeholder="Имя" style="width:100%; padding:12px; background:var(--bg); border:2px solid var(--border); border-radius:10px; color:var(--text); outline:none;">
+            </div>
+
+            <div class="settings-section">
+                <div class="settings-label">Цвет аватарки</div>
+                <input type="color" id="settings-color" style="width:100%; height:50px; border:none; border-radius:10px; cursor:pointer; background:var(--bg);">
+            </div>
+
+            <div class="settings-section">
+                <div class="settings-label">Шрифт</div>
+                <select id="settings-font" style="width:100%; padding:12px; background:var(--bg); border:2px solid var(--border); border-radius:10px; color:var(--text); outline:none;">
+                    <option value="Inter, sans-serif">Inter (По умолчанию)</option>
+                    <option value="Arial, sans-serif">Arial</option>
+                    <option value="'Roboto', sans-serif">Roboto</option>
+                    <option value="'Courier New', monospace">Courier New</option>
+                    <option value="'Times New Roman', serif">Times New Roman</option>
+                    <option value="'Comic Sans MS', cursive">Comic Sans</option>
+                </select>
+            </div>
+
+            <div class="modal-actions" style="margin-bottom:20px;">
+                <button class="modal-btn secondary" onclick="closeSettings()">Отмена</button>
+                <button class="modal-btn primary" onclick="saveSettings()">Сохранить</button>
+            </div>
+
+            <div class="settings-divider"></div>
+
+            <div class="settings-section">
+                <div class="settings-label">🚫 Заблокированные</div>
+                <div id="blocked-list"></div>
+            </div>
+
+            <div class="settings-section">
+                <div class="settings-label">🔇 Игнорируемые</div>
+                <div id="ignored-list"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>
