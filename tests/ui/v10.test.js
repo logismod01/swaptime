@@ -532,6 +532,50 @@ async function run() {
   assert(document.getElementById("call-overlay").classList.contains("active"));
   assert(ws.sent.some((m) => m.type === "call" && m.action === "accept" && m.call_id === "c-2"));
 
+  // ---------- раскладка и мобильные панели ----------
+  const screenEl = document.getElementById("chat-screen");
+  api.openChat("bob");
+  await tick(80);
+  assert(screenEl.classList.contains("chat-open"), "чат помечает экран chat-open");
+  assert(!screenEl.classList.contains("pane-open"), "личный чат не включает pane-open");
+
+  // поиск по списку чатов (сначала возвращаемся в раздел личных сообщений)
+  api.setView("chats");
+  await tick(40);
+  const search = document.getElementById("search-users");
+  const listEl = document.getElementById("users-list");
+  const showSearch = async (value) => {
+    search.value = value;
+    search.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await tick(30);
+    return [...listEl.querySelectorAll(".user-item")].filter((n) => n.style.display !== "none");
+  };
+  assert.strictEqual((await showSearch("zzzz")).length, 0, "несовпадения скрываются");
+  assert(listEl.textContent.includes("Ничего не найдено"), "видно «Ничего не найдено»");
+  assert.strictEqual((await showSearch("бо")).length, 1, "поиск по русскому имени работает");
+  assert.strictEqual((await showSearch("@bob")).length, 1, "поиск с @ работает");
+  assert.strictEqual((await showSearch("")).length, 1, "пустой запрос показывает всех");
+  assert(!listEl.textContent.includes("Ничего не найдено"), "пустой результат убирается");
+
+  // канал сервера и канал TG на телефоне — отдельная панель
+  await api.openServer(1);
+  await tick(80);
+  assert(screenEl.classList.contains("pane-open"), "канал сервера открывает панель на телефоне");
+  document.querySelector('[data-action="close-server-chat"]').click();
+  await tick(20);
+  assert(!screenEl.classList.contains("pane-open"), "«назад» из канала сервера закрывает панель");
+
+  await api.openTgChannel(5);
+  await tick(80);
+  assert(screenEl.classList.contains("pane-open"), "канал Telegram открывает панель на телефоне");
+  document.querySelector('[data-action="close-tg"]').click();
+  await tick(20);
+  assert(!screenEl.classList.contains("pane-open"), "«назад» из канала Telegram закрывает панель");
+
+  api.setView("chats");
+  await tick(30);
+  assert(!screenEl.classList.contains("pane-open"), "переход в личные сообщения закрывает панель");
+
   assert.strictEqual(errors.length, 0, "ошибки по ходу теста: " + errors.join("; "));
   console.log("✅ Тесты v10 (темы, серверы, каналы, звонки, закреплённые) прошли");
   process.exit(0); // таймеры звонка держат event loop — выходим явно

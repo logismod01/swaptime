@@ -116,6 +116,7 @@ async function openServerChannel(channelId) {
   if (!channel) return;
 
   state.activeChannel = channelId;
+  if (typeof setMobilePane === "function") setMobilePane(true);
   $("server-channel-name").textContent = channel.name;
   $("server-channel-topic").textContent = channel.topic || "без темы";
   $("server-input").placeholder = "Написать в #" + channel.name;

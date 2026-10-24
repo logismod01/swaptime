@@ -109,6 +109,7 @@ async function openTgChannel(channelId, options = {}) {
     const data = await api("/api/tg/channels/" + channelId);
     if (state.view !== "tg") setView("tg");
     state.activeTg = channelId;
+    if (!options.silent && typeof setMobilePane === "function") setMobilePane(true);
     state.tgData = data;
 
     renderTgHeader();

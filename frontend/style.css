@@ -678,7 +678,16 @@ body.on-chat { overflow: hidden; }
 .no-chat p { font-size: 13.5px; max-width: 320px; line-height: 1.5; }
 .no-chat .btn-ghost { margin-top: 10px; }
 
-.chat-active { flex-direction: column; height: 100%; min-height: 0; }
+/* контейнеры экранов внутри чат-области: всегда во всю высоту */
+.chat-area > .view-pane {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    height: 100%;
+}
+
+.chat-active { flex-direction: column; flex: 1; height: 100%; min-height: 0; }
 
 .chat-header {
     height: 52px;
@@ -1615,8 +1624,15 @@ body.on-chat { overflow: hidden; }
     .sidebar { width: 100%; }
 
     .chat-area { display: none; width: 100%; }
-    #chat-screen.chat-open .sidebar { display: none; }
-    #chat-screen.chat-open .chat-area { display: flex; }
+    /* display у сайдбаров ставится инлайном из JS (setSidebar) — перебиваем только !important */
+    #chat-screen.chat-open .sidebar,
+    #chat-screen.chat-open #home-sidebar,
+    #chat-screen.chat-open #server-sidebar,
+    #chat-screen.pane-open .sidebar,
+    #chat-screen.pane-open #home-sidebar,
+    #chat-screen.pane-open #server-sidebar { display: none !important; }
+    #chat-screen.chat-open .chat-area,
+    #chat-screen.pane-open .chat-area { display: flex; flex: 1 1 auto; width: 100%; min-width: 0; }
 
     .back-btn { display: inline-flex; }
 
@@ -1656,7 +1672,10 @@ body.on-chat { overflow: hidden; }
 }
 
 @media (hover: none) {
-    .message-actions { opacity: 1; pointer-events: auto; }
+    /* на тач-экранах действия показываем по тапу по сообщению, а не у всех сразу */
+    .message-actions { opacity: 0; pointer-events: none; }
+    .message-wrapper.show-actions .message-actions { opacity: 1; pointer-events: auto; }
+    .message-wrapper.show-actions { background: var(--hover); }
     .friend-actions { opacity: 1; }
     .msg-gutter { display: block; }
 }
@@ -2277,6 +2296,7 @@ body {
 }
 
 #tg-view, #server-view { flex-direction: column; height: 100%; min-height: 0; }
+#home-chat { flex: 1; min-height: 0; }
 .tg-feed {
     flex: 1;
     min-height: 0;
@@ -2834,7 +2854,7 @@ body.in-call { overflow: hidden; }
 /* безопасные зоны на телефоне (вырез, домашний индикатор) */
 @supports (padding: max(0px)) {
     body { padding-bottom: env(safe-area-inset-bottom); }
-    .chat-input { padding-bottom: max(10px, env(safe-area-inset-bottom)); }
+    .chat-input { margin-bottom: calc(16px + env(safe-area-inset-bottom)); }
     .rail { padding-top: max(10px, env(safe-area-inset-top)); }
     .sidebar-head, .chat-header { padding-top: env(safe-area-inset-top); }
 }
