@@ -2816,3 +2816,30 @@ body.in-call { overflow: hidden; }
     .pinned-bar { padding: 5px 8px; }
     .pin-item-text { -webkit-line-clamp: 3; }
 }
+
+/* ============================================================
+   v11 — установка как приложение (PWA)
+   ============================================================ */
+.install-btn {
+    color: #8ef0b8;
+    animation: installGlow 2.4s ease-in-out infinite;
+}
+.install-btn:hover { background: rgba(52, 211, 153, 0.16); color: #b8ffd8; }
+
+@keyframes installGlow {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); }
+    50% { box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.16); }
+}
+
+/* безопасные зоны на телефоне (вырез, домашний индикатор) */
+@supports (padding: max(0px)) {
+    body { padding-bottom: env(safe-area-inset-bottom); }
+    .chat-input { padding-bottom: max(10px, env(safe-area-inset-bottom)); }
+    .rail { padding-top: max(10px, env(safe-area-inset-top)); }
+    .sidebar-head, .chat-header { padding-top: env(safe-area-inset-top); }
+}
+
+/* в standalone-режиме (иконка на телефоне) чуть больше воздуха сверху */
+@media (display-mode: standalone) {
+    .rail { padding-top: max(10px, env(safe-area-inset-top)); }
+}

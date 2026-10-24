@@ -2532,6 +2532,9 @@ const ACTIONS = {
   "open-settings": () => openSettings(),
   "close-settings": () => closeSettings(),
   "logout": () => logout(),
+  "install-app": () => {
+    if (window.__swaptimeInstall) window.__swaptimeInstall();
+  },
   "add-friend": () => openAddFriend(),
   "close-add-friend": () => closeAddFriend(),
   "send-friend-request": () => sendFriendRequest(),

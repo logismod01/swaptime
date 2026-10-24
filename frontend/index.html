@@ -5,6 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>СвапТайм — Мессенджер</title>
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <meta name="theme-color" content="#0b0b12">
+    <meta name="description" content="СвапТайм — мессенджер: чаты, серверы как в Discord, каналы как в Telegram, звонки и демонстрация экрана до 4K.">
+
+    <!-- установка как приложение -->
+    <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="СвапТайм">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="format-detection" content="telephone=no">
 
     <!-- 10 шрифтов для настроек -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -170,6 +181,7 @@
                         </span>
                     </button>
                     <div class="me-actions">
+                        <button class="icon-btn install-btn" id="install-btn" data-action="install-app" title="Установить приложение" style="display:none;">⬇</button>
                         <button class="icon-btn" data-action="open-settings" title="Настройки">⚙</button>
                         <button class="icon-btn" data-action="logout" title="Выйти">⏻</button>
                     </div>
@@ -750,5 +762,6 @@
     <script src="/static/servers.js?v=10"></script>
     <script src="/static/channels.js?v=10"></script>
     <script src="/static/calls.js?v=10"></script>
+    <script src="/static/pwa.js?v=10"></script>
 </body>
 </html>

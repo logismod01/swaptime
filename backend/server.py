@@ -3079,6 +3079,62 @@ async def root():
     )
 
 
+@app.get("/api/ice")
+async def ice_servers(user: str = Depends(auth_user)):
+    """ICE-серверы для звонков: STUN по умолчанию + TURN, если задан в окружении.
+
+    TURN нужен, когда оба собеседника за строгими NAT — без него
+    видео/экран может не пробиться. Настройка:
+        SWAPTIME_TURN_URL=turn:turn.example.com:3478
+        SWAPTIME_TURN_USER=user
+        SWAPTIME_TURN_PASS=secret
+    """
+    servers = [
+        {"urls": "stun:stun.l.google.com:19302"},
+        {"urls": "stun:stun1.l.google.com:19302"},
+        {"urls": "stun:global.stun.twilio.com:3478"},
+    ]
+
+    turn_urls = [u.strip() for u in os.environ.get("SWAPTIME_TURN_URL", "").split(",") if u.strip()]
+    turn_user = os.environ.get("SWAPTIME_TURN_USER", "").strip()
+    turn_pass = os.environ.get("SWAPTIME_TURN_PASS", "").strip()
+    if turn_urls:
+        entry = {"urls": turn_urls}
+        if turn_user:
+            entry["username"] = turn_user
+            entry["credential"] = turn_pass
+        servers.append(entry)
+
+    return {"iceServers": servers, "turn": bool(turn_urls)}
+
+
+@app.get("/manifest.webmanifest")
+async def manifest():
+    return FileResponse(
+        FRONTEND_PATH / "manifest.webmanifest",
+        media_type="application/manifest+json",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/sw.js")
+async def service_worker():
+    # service worker обязан лежать в корне scope, иначе не увидит всё приложение
+    return FileResponse(
+        FRONTEND_PATH / "sw.js",
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"},
+    )
+
+
+@app.get("/offline.html")
+async def offline_page():
+    return FileResponse(
+        FRONTEND_PATH / "offline.html",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
+
+
 @app.get("/style.css")
 async def css():
     return FileResponse(FRONTEND_PATH / "style.css")
