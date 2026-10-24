@@ -1,7 +1,8 @@
 # СвапТайм 💬
 
 Мессенджер на FastAPI + WebSocket с интерфейсом в стиле Discord:
-тёмная тема, рейл со списком чатов, группировка сообщений, карточка профиля.
+рейл с серверами, каналы с ролями и участниками, Telegram-каналы с постами,
+звонки WebRTC (видео, экран до 4K) и 10 градиентных тем.
 
 Один процесс отдаёт и API, и фронтенд.
 
@@ -23,7 +24,7 @@ python backend/server.py
 
 ```bash
 pip install pytest httpx websockets
-python -m pytest tests -q          # API + WebSocket
+python -m pytest tests -q          # API + WebSocket (включая v10)
 
 npm install                        # для UI-тестов (jsdom)
 npm run test:ui                    # фронтенд без браузера
@@ -43,6 +44,20 @@ npm run test:ui                    # фронтенд без браузера
 - **10 кастомных рамок** вокруг аватарки (одна из них анимированная);
 - **баннеры профиля**, «о себе», карточка профиля как в Discord;
 - **10 шрифтов** интерфейса с живым предпросмотром;
+- **10 градиентных тем**: midnight, ocean, emerald, violet, sunset, cyber,
+  coffee, mono, aurora, cherry — применяются сразу и запоминаются;
+- **серверы как в Discord**: свой сервер (название, эмодзи-иконка, описание,
+  цвет), текстовые каналы, инвайт-код, роли владелец/админ/участник,
+  кик, выход и удаление, непрочитанные по каналам;
+- сообщения в каналах сервера: правка и удаление в реальном времени, «печатает…»;
+- **каналы как в Telegram**: создание своего канала (название, описание,
+  цвет, публичный/закрытый), лента постов, правка и удаление постов,
+  подписки, поиск публичных каналов, непрочитанные;
+- **звонки**: аудио и видео P2P (WebRTC), демонстрация экрана до **4K**,
+  входящий звонок с принять/отклонить/занято, таймер, статистика
+  (битрейт, разрешение, fps, потери, пинг) и настройки: качество (480p…4K),
+  fps, битрейт, кодек (VP9/VP8/H.264/AV1/авто), эхоподавление,
+  шумоподавление, АКГ, зеркало, 4K-экран — в профиле и прямо в звонке;
 - адаптивная вёрстка (на телефоне чат открывается на весь экран).
 
 ## Структура
@@ -50,9 +65,13 @@ npm run test:ui                    # фронтенд без браузера
 ```
 backend/server.py     API + WebSocket + отдача фронтенда
 frontend/index.html   разметка
-frontend/script.js    вся логика клиента
-frontend/style.css    стили и рамки/баннеры
+frontend/script.js    ядро клиента: чаты, темы, роутер экранов
+frontend/servers.js   серверы: каналы, участники, роли, инвайты
+frontend/channels.js  Telegram-каналы: лента постов, подписки, поиск
+frontend/calls.js     WebRTC-звонки, шаринг экрана, статистика
+frontend/style.css    стили, 10 тем, рамки/баннеры
 tests/test_smoke.py   сквозной тест API и WebSocket
+tests/test_v10.py     тесты серверов, каналов, тем и звонков
 tests/ui/*.test.js    UI-тесты на jsdom
 data/swaptime.db      база SQLite
 ```
@@ -67,7 +86,7 @@ data/swaptime.db      база SQLite
 | Метод | Адрес | Что делает |
 |-------|-------|------------|
 | POST | `/api/register`, `/api/login`, `/api/logout` | аккаунт и сессия |
-| GET | `/api/me` | текущий пользователь + шрифты, рамки, баннеры |
+| GET | `/api/me` | текущий пользователь + шрифты, рамки, баннеры, темы |
 | POST | `/api/update_profile` | имя, цвет, шрифт, рамка, баннер, био |
 | POST | `/api/avatar` | загрузить/удалить аватарку (data URL, ≤ 300 КБ) |
 | GET | `/api/avatar/{username}` | файл аватарки (кеш на год, ETag) |
@@ -77,11 +96,18 @@ data/swaptime.db      база SQLite
 | POST | `/api/mark_read` | отметить чат прочитанным |
 | POST | `/api/messages/edit`, `/api/messages/delete` | правка/удаление (REST-фолбэк) |
 | GET/POST | `/api/friends*` | заявки, блокировки, игнор |
-| WS | `/ws?token=...` | сообщения, правки, удаления, typing, presence |
+| GET/POST | `/api/servers*` | серверы: создание, инвайт, каналы, участники, роли |
+| GET/POST | `/api/tg/*` | Telegram-каналы: посты, подписки, поиск |
+| WS | `/ws?token=...` | сообщения, правки, удаления, typing, presence, звонки |
 
 События WebSocket: `message`, `message_updated`, `read`, `read_sync`,
 `typing`, `presence`, `friend_request`, `friend_changed`,
-`profile_updated`, `error`, `pong`.
+`profile_updated`, `server_message`, `server_message_updated`,
+`server_typing`, `server_channels_changed`, `server_members_changed`,
+`server_member_joined`, `server_member_left`, `server_updated`, `server_left`,
+`tg_post`, `tg_post_updated`, `tg_channel_deleted`,
+`call_incoming`, `call_accept`, `call_reject`, `call_end`, `call_busy`,
+`call_signal`, `call_error`, `error`, `pong`.
 
 ## Аватарки и рамки
 
@@ -92,3 +118,26 @@ data/swaptime.db      база SQLite
 
 Рамки: `none, crimson, gold, neon, aurora, fire, ice, galaxy, rainbow, mono`.
 Баннеры: `crimson, sunset, ocean, forest, galaxy, night, mono`.
+
+## Серверы и каналы (v10)
+
+При создании сервера сразу появляются каналы `общий` и `флудилка`, а владелец
+получает инвайт-код (`POST /api/servers/join {code}`). Владелец может менять
+роли (`admin`/`member`), исключать участников (`.../members/{ник}/kick`),
+пересоздать код (`.../rotate_invite`) и удалить сервер; админы — создавать
+каналы и удалять сообщения; участники — писать.
+
+Telegram-каналы — отдельная сущность: у канала есть владелец, описание, цвет и
+флаг `is_public`. Публиковать может только владелец, остальные подписываются
+и читают. Публичные каналы ищутся через `GET /api/tg/discover?q=`.
+
+## Звонки
+
+Сигналинг идёт по тому же WebSocket (`{"type":"call", "action": ...}`),
+медиа — напрямую между браузерами (STUN-серверы Google/Twilio).
+Звонить можно друзьям и участникам общих серверов. Качество задаётся
+в настройках: пресеты 480p/720p/1080p/1440p/4K, fps 15–60, битрейт
+1–20 Мбит/с, предпочтительный кодек; всё это применяется на ходу через
+`RTCRtpSender.setParameters`. Демонстрация экрана запрашивается
+в 3840×2160 при включённом 4K и переключается на лету (`replaceTrack`).
+Панель статистики показывает битрейт, разрешение, fps, потери пакетов и пинг.

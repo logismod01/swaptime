@@ -51,6 +51,25 @@ USERNAME_RE = re.compile(r"^[a-z0-9_]{3,20}$")
 COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 FONT_RE = re.compile(r"^[A-Za-z0-9 ,'\-]{1,80}$")
 
+THEMES = [
+    "midnight",
+    "ocean",
+    "emerald",
+    "violet",
+    "sunset",
+    "cyber",
+    "coffee",
+    "mono",
+    "aurora",
+    "cherry",
+]
+
+MAX_SERVER_NAME = 32
+MAX_CHANNEL_NAME = 32
+MAX_SERVER_DESC = 300
+MAX_TG_POST = 4000
+MAX_SERVER_MSG = 4000
+
 FRAMES = [
     "none",
     "crimson",
@@ -186,18 +205,126 @@ def init_db() -> None:
         )
     """)
 
+    # ---------- серверы (как в Discord) ----------
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS servers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            icon TEXT DEFAULT '',
+            icon_color TEXT DEFAULT '#e53935',
+            description TEXT DEFAULT '',
+            owner TEXT NOT NULL,
+            invite_code TEXT UNIQUE NOT NULL,
+            created_at INTEGER NOT NULL
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS server_members (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            server_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            role TEXT DEFAULT 'member',
+            joined_at INTEGER NOT NULL,
+            UNIQUE(server_id, username)
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS server_channels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            server_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            topic TEXT DEFAULT '',
+            position INTEGER DEFAULT 0,
+            created_at INTEGER NOT NULL
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS server_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id INTEGER NOT NULL,
+            from_user TEXT NOT NULL,
+            text TEXT NOT NULL,
+            edited INTEGER DEFAULT 0,
+            deleted INTEGER DEFAULT 0,
+            client_id TEXT,
+            created_at INTEGER NOT NULL
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS server_read (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            channel_id INTEGER NOT NULL,
+            last_read_id INTEGER DEFAULT 0,
+            UNIQUE(username, channel_id)
+        )
+    """)
+
+    # ---------- Telegram-каналы ----------
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS tg_channels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner TEXT NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            color TEXT DEFAULT '#e53935',
+            is_public INTEGER DEFAULT 1,
+            created_at INTEGER NOT NULL
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS tg_posts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id INTEGER NOT NULL,
+            author TEXT NOT NULL,
+            text TEXT NOT NULL,
+            edited INTEGER DEFAULT 0,
+            deleted INTEGER DEFAULT 0,
+            created_at INTEGER NOT NULL
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS tg_subscribers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            UNIQUE(channel_id, username)
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS tg_read (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            channel_id INTEGER NOT NULL,
+            last_read_id INTEGER DEFAULT 0,
+            UNIQUE(username, channel_id)
+        )
+    """)
+
     # мягкие миграции старых баз
     _add_column(c, "users", "last_seen", "INTEGER DEFAULT 0")
     _add_column(c, "users", "avatar", "TEXT DEFAULT ''")
     _add_column(c, "users", "avatar_frame", "TEXT DEFAULT 'none'")
     _add_column(c, "users", "banner", "TEXT DEFAULT 'crimson'")
     _add_column(c, "users", "bio", "TEXT DEFAULT ''")
+    _add_column(c, "users", "theme", "TEXT DEFAULT 'midnight'")
     _add_column(c, "messages", "client_id", "TEXT")
 
     c.execute("CREATE INDEX IF NOT EXISTS idx_msg_pair ON messages(from_user, to_user, id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_msg_to ON messages(to_user, id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_msg_client ON messages(client_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_friends_user ON friends(user1, user2, status)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_srv_msg ON server_messages(channel_id, id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_srv_members ON server_members(server_id, username)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_tg_posts ON tg_posts(channel_id, id)")
 
     conn.commit()
     conn.close()
@@ -260,7 +387,7 @@ def get_user(username: str) -> Optional[dict]:
     conn = db_connect()
     row = conn.execute(
         "SELECT id, username, display_name, avatar_color, font_family, last_seen, "
-        "avatar, avatar_frame, banner, bio, created_at "
+        "avatar, avatar_frame, banner, bio, theme, created_at "
         "FROM users WHERE username = ?",
         (username,),
     ).fetchone()
@@ -278,6 +405,7 @@ def get_user(username: str) -> Optional[dict]:
         "avatar_frame": row["avatar_frame"] or "none",
         "banner": row["banner"] or "crimson",
         "bio": row["bio"] or "",
+        "theme": row["theme"] if row["theme"] in THEMES else THEMES[0],
         "font_family": normalize_font(row["font_family"] or FONTS[0]),
         "last_seen": row["last_seen"] or 0,
         "created_at": row["created_at"] or 0,
@@ -399,6 +527,7 @@ class UpdateProfile(BaseModel):
     avatar_frame: Optional[str] = None
     banner: Optional[str] = None
     bio: Optional[str] = None
+    theme: Optional[str] = None
 
 
 class AvatarPayload(BaseModel):
@@ -702,6 +831,7 @@ async def me(user: str = Depends(auth_user)):
         "fonts": FONTS,
         "frames": FRAMES,
         "banners": BANNERS,
+        "themes": THEMES,
     }
 
 
@@ -734,11 +864,15 @@ def _apply_profile_update(user: str, data: UpdateProfile) -> dict:
     if data.bio is not None:
         bio = (data.bio or "").strip()[:BIO_MAX]
 
+    theme = current["theme"]
+    if data.theme is not None:
+        theme = data.theme if data.theme in THEMES else THEMES[0]
+
     conn = db_connect()
     conn.execute(
         "UPDATE users SET display_name = ?, avatar_color = ?, font_family = ?, "
-        "avatar_frame = ?, banner = ?, bio = ? WHERE username = ?",
-        (display_name, color, font, frame, banner, bio, user),
+        "avatar_frame = ?, banner = ?, bio = ?, theme = ? WHERE username = ?",
+        (display_name, color, font, frame, banner, bio, theme, user),
     )
     conn.commit()
     conn.close()
@@ -821,6 +955,8 @@ async def get_profile(username: str, viewer: str = Depends(auth_user)):
         "blocked_by_me": username in block_list(viewer),
         "blocked_me": blocked_by(viewer, username),
         "ignored_by_me": username in ignore_list(viewer),
+        "can_call": can_call(viewer, username),
+        "same_server": same_server(viewer, username),
     })
     return payload
 
@@ -836,6 +972,7 @@ async def get_settings(user: str = Depends(auth_user)):
         "fonts": FONTS,
         "frames": FRAMES,
         "banners": BANNERS,
+        "themes": THEMES,
     }
 
 
@@ -1186,6 +1323,1032 @@ async def unignore_user(data: FriendRequest, user: str = Depends(auth_user)):
     return {"ok": True, "message": "Убран из игнора"}
 
 
+
+# ============================================
+# СЕРВЕРЫ (как в Discord) — ХЕЛПЕРЫ
+# ============================================
+def _invite_code() -> str:
+    return secrets.token_urlsafe(6).replace("-", "").replace("_", "")[:8]
+
+
+def server_role(server_id: int, username: str) -> Optional[str]:
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT role FROM server_members WHERE server_id = ? AND username = ?",
+        (server_id, username),
+    ).fetchone()
+    conn.close()
+    return row["role"] if row else None
+
+
+def server_member_names(server_id: int) -> list:
+    conn = db_connect()
+    rows = conn.execute(
+        "SELECT username FROM server_members WHERE server_id = ?", (server_id,)
+    ).fetchall()
+    conn.close()
+    return [r["username"] for r in rows]
+
+
+def can_manage_server(server_id: int, username: str) -> bool:
+    return server_role(server_id, username) in ("owner", "admin")
+
+
+def same_server(a: str, b: str) -> bool:
+    conn = db_connect()
+    row = conn.execute(
+        """
+        SELECT 1 FROM server_members m1
+        JOIN server_members m2 ON m1.server_id = m2.server_id
+        WHERE m1.username = ? AND m2.username = ? LIMIT 1
+        """,
+        (a, b),
+    ).fetchone()
+    conn.close()
+    return bool(row)
+
+
+def can_call(a: str, b: str) -> bool:
+    """Звонить можно друзьям и людям с общего сервера."""
+    if a == b:
+        return False
+    if is_blocked(a, b):
+        return False
+    return are_friends(a, b) or same_server(a, b)
+
+
+def _server_channels_payload(conn: sqlite3.Connection, server_id: int, viewer: str) -> list:
+    rows = conn.execute(
+        "SELECT id, name, topic, position FROM server_channels "
+        "WHERE server_id = ? ORDER BY position, id",
+        (server_id,),
+    ).fetchall()
+
+    reads = dict(
+        conn.execute(
+            "SELECT channel_id, last_read_id FROM server_read WHERE username = ?", (viewer,)
+        ).fetchall()
+    )
+
+    channels = []
+    for row in rows:
+        last_read = reads.get(row["id"], 0)
+        unread = conn.execute(
+            "SELECT COUNT(*) FROM server_messages "
+            "WHERE channel_id = ? AND id > ? AND deleted = 0 AND from_user != ?",
+            (row["id"], last_read, viewer),
+        ).fetchone()[0]
+        channels.append({
+            "id": row["id"],
+            "name": row["name"],
+            "topic": row["topic"] or "",
+            "position": row["position"],
+            "unread": unread,
+        })
+    return channels
+
+
+def _server_payload(server_id: int, viewer: str) -> Optional[dict]:
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT id, name, icon, icon_color, description, owner, invite_code, created_at "
+        "FROM servers WHERE id = ?",
+        (server_id,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return None
+
+    member_rows = conn.execute(
+        "SELECT username, role, joined_at FROM server_members "
+        "WHERE server_id = ? ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, joined_at",
+        (server_id,),
+    ).fetchall()
+
+    members = []
+    for m in member_rows:
+        info = get_user(m["username"])
+        if not info:
+            continue
+        card = short_profile(info)
+        card["role"] = m["role"]
+        card["joined_at"] = m["joined_at"]
+        members.append(card)
+
+    channels = _server_channels_payload(conn, server_id, viewer)
+    my_role = server_role(server_id, viewer)
+    conn.close()
+
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "icon": row["icon"] or "",
+        "icon_color": row["icon_color"] or "#e53935",
+        "description": row["description"] or "",
+        "owner": row["owner"],
+        "invite_code": row["invite_code"],
+        "created_at": row["created_at"],
+        "channels": channels,
+        "members": members,
+        "member_count": len(members),
+        "my_role": my_role,
+        "unread": sum(ch["unread"] for ch in channels),
+    }
+
+
+async def broadcast_to_server(server_id: int, payload: dict, exclude: Optional[str] = None) -> None:
+    for member in server_member_names(server_id):
+        if member == exclude:
+            continue
+        await send_to_user(member, payload)
+
+
+# ============================================
+# API — СЕРВЕРЫ
+# ============================================
+class ServerCreate(BaseModel):
+    name: str
+    icon: str = ""
+    icon_color: str = "#e53935"
+    description: str = ""
+
+
+class ServerUpdate(BaseModel):
+    name: Optional[str] = None
+    icon: Optional[str] = None
+    icon_color: Optional[str] = None
+    description: Optional[str] = None
+
+
+class ServerJoin(BaseModel):
+    code: str
+
+
+class ChannelCreate(BaseModel):
+    name: str
+    topic: str = ""
+
+
+class ChannelUpdate(BaseModel):
+    name: Optional[str] = None
+    topic: Optional[str] = None
+
+
+class ServerMessageIn(BaseModel):
+    text: str
+    client_id: Optional[str] = None
+
+
+def _clean_channel_name(name: str) -> str:
+    cleaned = re.sub(r"\s+", "-", (name or "").strip().lower())
+    cleaned = re.sub(r"[^a-zа-я0-9_-]", "", cleaned)
+    return cleaned[:MAX_CHANNEL_NAME] or "канал"
+
+
+@app.get("/api/servers")
+async def list_servers(user: str = Depends(auth_user)):
+    conn = db_connect()
+    rows = conn.execute(
+        """
+        SELECT s.id FROM servers s
+        JOIN server_members m ON m.server_id = s.id
+        WHERE m.username = ?
+        ORDER BY s.id
+        """,
+        (user,),
+    ).fetchall()
+    conn.close()
+
+    servers = []
+    for r in rows:
+        payload = _server_payload(r["id"], user)
+        if payload:
+            servers.append({
+                "id": payload["id"],
+                "name": payload["name"],
+                "icon": payload["icon"],
+                "icon_color": payload["icon_color"],
+                "unread": payload["unread"],
+                "member_count": payload["member_count"],
+                "my_role": payload["my_role"],
+            })
+    return {"servers": servers}
+
+
+@app.post("/api/servers")
+async def create_server(data: ServerCreate, user: str = Depends(auth_user)):
+    name = (data.name or "").strip()[:MAX_SERVER_NAME]
+    if len(name) < 2:
+        raise HTTPException(400, "Название сервера — минимум 2 символа")
+
+    icon = (data.icon or "").strip()[:4]
+    color = data.icon_color if COLOR_RE.match(data.icon_color or "") else "#e53935"
+    description = (data.description or "").strip()[:MAX_SERVER_DESC]
+    now = int(time.time())
+
+    conn = db_connect()
+    code = _invite_code()
+    while conn.execute("SELECT 1 FROM servers WHERE invite_code = ?", (code,)).fetchone():
+        code = _invite_code()
+
+    cur = conn.execute(
+        "INSERT INTO servers (name, icon, icon_color, description, owner, invite_code, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (name, icon, color, description, user, code, now),
+    )
+    server_id = cur.lastrowid
+
+    conn.execute(
+        "INSERT INTO server_members (server_id, username, role, joined_at) VALUES (?, ?, 'owner', ?)",
+        (server_id, user, now),
+    )
+    conn.execute(
+        "INSERT INTO server_channels (server_id, name, topic, position, created_at) VALUES (?, ?, ?, 0, ?)",
+        (server_id, "общий", "Главный канал сервера", now),
+    )
+    conn.execute(
+        "INSERT INTO server_channels (server_id, name, topic, position, created_at) VALUES (?, ?, ?, 1, ?)",
+        (server_id, "флудилка", "Обо всём и ни о чём", now),
+    )
+    conn.commit()
+    conn.close()
+
+    payload = _server_payload(server_id, user)
+    return {"ok": True, "server": payload}
+
+
+@app.get("/api/servers/invite/{code}")
+async def invite_preview(code: str, user: str = Depends(auth_user)):
+    code = (code or "").strip()
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT id, name, icon, icon_color, description FROM servers WHERE invite_code = ?",
+        (code,),
+    ).fetchone()
+    count = 0
+    already = False
+    if row:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM server_members WHERE server_id = ?", (row["id"],)
+        ).fetchone()[0]
+        already = server_role(row["id"], user) is not None
+    conn.close()
+
+    if not row:
+        raise HTTPException(404, "Приглашение недействительно")
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "icon": row["icon"] or "",
+        "icon_color": row["icon_color"] or "#e53935",
+        "description": row["description"] or "",
+        "member_count": count,
+        "already_member": already,
+    }
+
+
+@app.post("/api/servers/join")
+async def join_server(data: ServerJoin, user: str = Depends(auth_user)):
+    code = (data.code or "").strip()
+    conn = db_connect()
+    row = conn.execute("SELECT id, name FROM servers WHERE invite_code = ?", (code,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Приглашение недействительно")
+    server_id = row["id"]
+
+    if conn.execute(
+        "SELECT 1 FROM server_members WHERE server_id = ? AND username = ?", (server_id, user)
+    ).fetchone():
+        conn.close()
+        raise HTTPException(400, "Ты уже на этом сервере")
+
+    conn.execute(
+        "INSERT INTO server_members (server_id, username, role, joined_at) VALUES (?, ?, 'member', ?)",
+        (server_id, user, int(time.time())),
+    )
+    conn.commit()
+    conn.close()
+
+    payload = _server_payload(server_id, user)
+    await broadcast_to_server(server_id, {"type": "server_member_joined", "server_id": server_id, "user": short_profile(get_user(user))})
+    return {"ok": True, "server": payload}
+
+
+@app.get("/api/servers/{server_id}")
+async def get_server(server_id: int, user: str = Depends(auth_user)):
+    if not server_role(server_id, user):
+        raise HTTPException(403, "Ты не участник этого сервера")
+    payload = _server_payload(server_id, user)
+    if not payload:
+        raise HTTPException(404, "Сервер не найден")
+    return payload
+
+
+@app.post("/api/servers/{server_id}/update")
+async def update_server(server_id: int, data: ServerUpdate, user: str = Depends(auth_user)):
+    if not can_manage_server(server_id, user):
+        raise HTTPException(403, "Нужны права администратора")
+
+    conn = db_connect()
+    row = conn.execute("SELECT * FROM servers WHERE id = ?", (server_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Сервер не найден")
+
+    name = (data.name or "").strip()[:MAX_SERVER_NAME] if data.name is not None else row["name"]
+    icon = (data.icon or "").strip()[:4] if data.icon is not None else row["icon"]
+    color = data.icon_color if data.icon_color and COLOR_RE.match(data.icon_color) else row["icon_color"]
+    description = (data.description or "").strip()[:MAX_SERVER_DESC] if data.description is not None else row["description"]
+
+    conn.execute(
+        "UPDATE servers SET name = ?, icon = ?, icon_color = ?, description = ? WHERE id = ?",
+        (name or row["name"], icon, color, description, server_id),
+    )
+    conn.commit()
+    conn.close()
+
+    await broadcast_to_server(server_id, {"type": "server_updated", "server_id": server_id})
+    return {"ok": True, "server": _server_payload(server_id, user)}
+
+
+@app.post("/api/servers/{server_id}/rotate_invite")
+async def rotate_invite(server_id: int, user: str = Depends(auth_user)):
+    if not can_manage_server(server_id, user):
+        raise HTTPException(403, "Нужны права администратора")
+    conn = db_connect()
+    code = _invite_code()
+    while conn.execute("SELECT 1 FROM servers WHERE invite_code = ?", (code,)).fetchone():
+        code = _invite_code()
+    conn.execute("UPDATE servers SET invite_code = ? WHERE id = ?", (code, server_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "invite_code": code}
+
+
+@app.delete("/api/servers/{server_id}")
+async def delete_server(server_id: int, user: str = Depends(auth_user)):
+    if server_role(server_id, user) != "owner":
+        raise HTTPException(403, "Удалить сервер может только владелец")
+
+    members = server_member_names(server_id)
+    conn = db_connect()
+    channel_ids = [r["id"] for r in conn.execute(
+        "SELECT id FROM server_channels WHERE server_id = ?", (server_id,)
+    ).fetchall()]
+    for cid in channel_ids:
+        conn.execute("DELETE FROM server_messages WHERE channel_id = ?", (cid,))
+        conn.execute("DELETE FROM server_read WHERE channel_id = ?", (cid,))
+    conn.execute("DELETE FROM server_channels WHERE server_id = ?", (server_id,))
+    conn.execute("DELETE FROM server_members WHERE server_id = ?", (server_id,))
+    conn.execute("DELETE FROM servers WHERE id = ?", (server_id,))
+    conn.commit()
+    conn.close()
+
+    for member in members:
+        await send_to_user(member, {"type": "server_left", "server_id": server_id, "deleted": True})
+    return {"ok": True}
+
+
+@app.post("/api/servers/{server_id}/leave")
+async def leave_server(server_id: int, user: str = Depends(auth_user)):
+    role = server_role(server_id, user)
+    if not role:
+        raise HTTPException(404, "Ты не на этом сервере")
+    if role == "owner":
+        raise HTTPException(400, "Владелец не может выйти — передай сервер или удали его")
+
+    conn = db_connect()
+    conn.execute("DELETE FROM server_members WHERE server_id = ? AND username = ?", (server_id, user))
+    conn.commit()
+    conn.close()
+
+    await send_to_user(user, {"type": "server_left", "server_id": server_id})
+    await broadcast_to_server(server_id, {"type": "server_member_left", "server_id": server_id, "username": user})
+    return {"ok": True}
+
+
+@app.post("/api/servers/{server_id}/channels")
+async def create_server_channel(server_id: int, data: ChannelCreate, user: str = Depends(auth_user)):
+    if not can_manage_server(server_id, user):
+        raise HTTPException(403, "Нужны права администратора")
+
+    name = _clean_channel_name(data.name)
+    conn = db_connect()
+    if not conn.execute("SELECT 1 FROM servers WHERE id = ?", (server_id,)).fetchone():
+        conn.close()
+        raise HTTPException(404, "Сервер не найден")
+    if conn.execute(
+        "SELECT 1 FROM server_channels WHERE server_id = ? AND name = ?", (server_id, name)
+    ).fetchone():
+        conn.close()
+        raise HTTPException(400, "Канал с таким названием уже есть")
+
+    pos = conn.execute(
+        "SELECT COALESCE(MAX(position), 0) + 1 FROM server_channels WHERE server_id = ?", (server_id,)
+    ).fetchone()[0]
+    cur = conn.execute(
+        "INSERT INTO server_channels (server_id, name, topic, position, created_at) VALUES (?, ?, ?, ?, ?)",
+        (server_id, name, (data.topic or "").strip()[:120], pos, int(time.time())),
+    )
+    channel_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+
+    await broadcast_to_server(server_id, {"type": "server_channels_changed", "server_id": server_id})
+    return {"ok": True, "channel_id": channel_id, "server": _server_payload(server_id, user)}
+
+
+@app.post("/api/servers/{server_id}/channels/{channel_id}/update")
+async def update_server_channel(server_id: int, channel_id: int, data: ChannelUpdate, user: str = Depends(auth_user)):
+    if not can_manage_server(server_id, user):
+        raise HTTPException(403, "Нужны права администратора")
+
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT name, topic FROM server_channels WHERE id = ? AND server_id = ?", (channel_id, server_id)
+    ).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Канал не найден")
+
+    name = _clean_channel_name(data.name) if data.name else row["name"]
+    topic = (data.topic or "").strip()[:120] if data.topic is not None else row["topic"]
+    conn.execute("UPDATE server_channels SET name = ?, topic = ? WHERE id = ?", (name, topic, channel_id))
+    conn.commit()
+    conn.close()
+
+    await broadcast_to_server(server_id, {"type": "server_channels_changed", "server_id": server_id})
+    return {"ok": True, "server": _server_payload(server_id, user)}
+
+
+@app.delete("/api/servers/{server_id}/channels/{channel_id}")
+async def delete_server_channel(server_id: int, channel_id: int, user: str = Depends(auth_user)):
+    if not can_manage_server(server_id, user):
+        raise HTTPException(403, "Нужны права администратора")
+
+    conn = db_connect()
+    total = conn.execute(
+        "SELECT COUNT(*) FROM server_channels WHERE server_id = ?", (server_id,)
+    ).fetchone()[0]
+    if total <= 1:
+        conn.close()
+        raise HTTPException(400, "Нельзя удалить последний канал")
+    conn.execute("DELETE FROM server_channels WHERE id = ? AND server_id = ?", (channel_id, server_id))
+    conn.execute("DELETE FROM server_messages WHERE channel_id = ?", (channel_id,))
+    conn.execute("DELETE FROM server_read WHERE channel_id = ?", (channel_id,))
+    conn.commit()
+    conn.close()
+
+    await broadcast_to_server(server_id, {"type": "server_channels_changed", "server_id": server_id})
+    return {"ok": True, "server": _server_payload(server_id, user)}
+
+
+def _server_message_dict(row: sqlite3.Row, conn: sqlite3.Connection) -> dict:
+    return {
+        "id": row["id"],
+        "channel_id": row["channel_id"],
+        "from": row["from_user"],
+        "text": "" if row["deleted"] else (row["text"] or ""),
+        "edited": row["edited"],
+        "deleted": row["deleted"],
+        "client_id": row["client_id"],
+        "created_at": row["created_at"],
+    }
+
+
+@app.get("/api/servers/{server_id}/channels/{channel_id}/messages")
+async def server_messages(
+    server_id: int,
+    channel_id: int,
+    limit: int = Query(default=100, ge=1, le=300),
+    user: str = Depends(auth_user),
+):
+    if not server_role(server_id, user):
+        raise HTTPException(403, "Ты не участник этого сервера")
+
+    conn = db_connect()
+    if not conn.execute(
+        "SELECT 1 FROM server_channels WHERE id = ? AND server_id = ?", (channel_id, server_id)
+    ).fetchone():
+        conn.close()
+        raise HTTPException(404, "Канал не найден")
+
+    rows = conn.execute(
+        "SELECT id, channel_id, from_user, text, edited, deleted, client_id, created_at "
+        "FROM server_messages WHERE channel_id = ? ORDER BY id DESC LIMIT ?",
+        (channel_id, limit),
+    ).fetchall()
+    messages = [_server_message_dict(r, conn) for r in reversed(rows)]
+    conn.close()
+    return messages
+
+
+@app.post("/api/servers/{server_id}/channels/{channel_id}/messages")
+async def post_server_message(
+    server_id: int,
+    channel_id: int,
+    data: ServerMessageIn,
+    user: str = Depends(auth_user),
+):
+    if not server_role(server_id, user):
+        raise HTTPException(403, "Ты не участник этого сервера")
+    text = (data.text or "").strip()
+    if not text:
+        raise HTTPException(400, "Пустое сообщение")
+    if len(text) > MAX_SERVER_MSG:
+        raise HTTPException(400, "Слишком длинное сообщение")
+
+    conn = db_connect()
+    if not conn.execute(
+        "SELECT 1 FROM server_channels WHERE id = ? AND server_id = ?", (channel_id, server_id)
+    ).fetchone():
+        conn.close()
+        raise HTTPException(404, "Канал не найден")
+
+    cur = conn.execute(
+        "INSERT INTO server_messages (channel_id, from_user, text, client_id, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (channel_id, user, text, data.client_id, int(time.time())),
+    )
+    msg_id = cur.lastrowid
+    conn.commit()
+    row = conn.execute(
+        "SELECT id, channel_id, from_user, text, edited, deleted, client_id, created_at "
+        "FROM server_messages WHERE id = ?",
+        (msg_id,),
+    ).fetchone()
+    payload = {"type": "server_message", "server_id": server_id, **_server_message_dict(row, conn)}
+    conn.close()
+
+    await broadcast_to_server(server_id, payload)
+    return payload
+
+
+@app.post("/api/servers/{server_id}/channels/{channel_id}/read")
+async def read_server_channel(server_id: int, channel_id: int, user: str = Depends(auth_user)):
+    if not server_role(server_id, user):
+        raise HTTPException(403, "Ты не участник этого сервера")
+    conn = db_connect()
+    last_id = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) FROM server_messages WHERE channel_id = ?", (channel_id,)
+    ).fetchone()[0]
+    conn.execute(
+        """
+        INSERT INTO server_read (username, channel_id, last_read_id) VALUES (?, ?, ?)
+        ON CONFLICT(username, channel_id) DO UPDATE SET last_read_id =
+            MAX(server_read.last_read_id, excluded.last_read_id)
+        """,
+        (user, channel_id, last_id),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "last_read_id": last_id}
+
+
+@app.post("/api/servers/{server_id}/members/{member}/kick")
+async def kick_member(server_id: int, member: str, user: str = Depends(auth_user)):
+    member = member.strip().lower()
+    my_role = server_role(server_id, user)
+    target_role = server_role(server_id, member)
+
+    if my_role not in ("owner", "admin"):
+        raise HTTPException(403, "Нужны права администратора")
+    if not target_role:
+        raise HTTPException(404, "Пользователь не на сервере")
+    if target_role == "owner":
+        raise HTTPException(400, "Владельца нельзя исключить")
+    if my_role == "admin" and target_role == "admin":
+        raise HTTPException(403, "Админ не может исключить админа")
+
+    conn = db_connect()
+    conn.execute("DELETE FROM server_members WHERE server_id = ? AND username = ?", (server_id, member))
+    conn.commit()
+    conn.close()
+
+    await send_to_user(member, {"type": "server_left", "server_id": server_id, "kicked": True})
+    await broadcast_to_server(server_id, {"type": "server_member_left", "server_id": server_id, "username": member})
+    return {"ok": True}
+
+
+class RoleUpdate(BaseModel):
+    role: str
+
+
+@app.post("/api/servers/{server_id}/members/{member}/role")
+async def set_member_role(server_id: int, member: str, data: RoleUpdate, user: str = Depends(auth_user)):
+    member = member.strip().lower()
+    if server_role(server_id, user) != "owner":
+        raise HTTPException(403, "Менять роли может только владелец")
+    if data.role not in ("admin", "member"):
+        raise HTTPException(400, "Неверная роль")
+    if server_role(server_id, member) in (None, "owner"):
+        raise HTTPException(400, "Этому пользователю нельзя менять роль")
+
+    conn = db_connect()
+    conn.execute(
+        "UPDATE server_members SET role = ? WHERE server_id = ? AND username = ?",
+        (data.role, server_id, member),
+    )
+    conn.commit()
+    conn.close()
+
+    await broadcast_to_server(server_id, {"type": "server_members_changed", "server_id": server_id})
+    return {"ok": True}
+
+
+# ============================================
+# API — TELEGRAM-КАНАЛЫ
+# ============================================
+class TgChannelCreate(BaseModel):
+    name: str
+    description: str = ""
+    color: str = "#e53935"
+    is_public: bool = True
+
+
+class TgPostIn(BaseModel):
+    text: str
+
+
+class TgPostEdit(BaseModel):
+    text: str
+
+
+def _tg_channel_payload(conn: sqlite3.Connection, row: sqlite3.Row, viewer: str) -> dict:
+    subscribed = bool(conn.execute(
+        "SELECT 1 FROM tg_subscribers WHERE channel_id = ? AND username = ?",
+        (row["id"], viewer),
+    ).fetchone())
+
+    read_row = conn.execute(
+        "SELECT last_read_id FROM tg_read WHERE username = ? AND channel_id = ?",
+        (viewer, row["id"]),
+    ).fetchone()
+    last_read = read_row["last_read_id"] if read_row else 0
+
+    unread = conn.execute(
+        "SELECT COUNT(*) FROM tg_posts WHERE channel_id = ? AND id > ? AND deleted = 0",
+        (row["id"], last_read),
+    ).fetchone()[0]
+
+    subs = conn.execute(
+        "SELECT COUNT(*) FROM tg_subscribers WHERE channel_id = ?", (row["id"],)
+    ).fetchone()[0]
+
+    last_post = conn.execute(
+        "SELECT id, text, created_at FROM tg_posts WHERE channel_id = ? AND deleted = 0 "
+        "ORDER BY id DESC LIMIT 1",
+        (row["id"],),
+    ).fetchone()
+
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "description": row["description"] or "",
+        "color": row["color"] or "#e53935",
+        "is_public": bool(row["is_public"]),
+        "owner": row["owner"],
+        "created_at": row["created_at"],
+        "subscribers": subs,
+        "subscribed": subscribed,
+        "is_owner": row["owner"] == viewer,
+        "unread": 0 if row["owner"] == viewer else unread,
+        "last_post": (
+            {"id": last_post["id"], "text": last_post["text"][:120], "created_at": last_post["created_at"]}
+            if last_post else None
+        ),
+    }
+
+
+def _tg_post_dict(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "channel_id": row["channel_id"],
+        "author": row["author"],
+        "text": "" if row["deleted"] else (row["text"] or ""),
+        "edited": row["edited"],
+        "deleted": row["deleted"],
+        "created_at": row["created_at"],
+    }
+
+
+@app.get("/api/tg/channels")
+async def list_tg_channels(user: str = Depends(auth_user)):
+    conn = db_connect()
+    mine = conn.execute(
+        "SELECT * FROM tg_channels WHERE owner = ? ORDER BY id DESC", (user,)
+    ).fetchall()
+    subscribed_ids = [r["channel_id"] for r in conn.execute(
+        "SELECT channel_id FROM tg_subscribers WHERE username = ?", (user,)
+    ).fetchall()]
+
+    rows = list(mine)
+    for cid in subscribed_ids:
+        if any(r["id"] == cid for r in rows):
+            continue
+        extra = conn.execute("SELECT * FROM tg_channels WHERE id = ?", (cid,)).fetchone()
+        if extra:
+            rows.append(extra)
+
+    channels = [_tg_channel_payload(conn, r, user) for r in rows]
+    conn.close()
+
+    channels.sort(key=lambda c: (not c["is_owner"], -(c["last_post"]["created_at"] if c["last_post"] else 0)))
+    return {"channels": channels}
+
+
+@app.get("/api/tg/discover")
+async def discover_tg_channels(q: str = "", user: str = Depends(auth_user)):
+    conn = db_connect()
+    query = (q or "").strip().casefold()
+    rows = conn.execute(
+        "SELECT * FROM tg_channels WHERE is_public = 1 ORDER BY id DESC LIMIT 60"
+    ).fetchall()
+    if query:
+        # SQLite LOWER() не умеет юникод — фильтруем в Python
+        rows = [
+            r for r in rows
+            if query in (r["name"] or "").casefold() or query in (r["description"] or "").casefold()
+        ][:30]
+    channels = [_tg_channel_payload(conn, r, user) for r in rows]
+    conn.close()
+    return {"channels": channels}
+
+
+@app.post("/api/tg/channels")
+async def create_tg_channel(data: TgChannelCreate, user: str = Depends(auth_user)):
+    name = (data.name or "").strip()[:40]
+    if len(name) < 2:
+        raise HTTPException(400, "Название канала — минимум 2 символа")
+    color = data.color if COLOR_RE.match(data.color or "") else "#e53935"
+    description = (data.description or "").strip()[:300]
+    now = int(time.time())
+
+    conn = db_connect()
+    cur = conn.execute(
+        "INSERT INTO tg_channels (owner, name, description, color, is_public, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (user, name, description, color, 1 if data.is_public else 0, now),
+    )
+    channel_id = cur.lastrowid
+    conn.execute(
+        "INSERT INTO tg_subscribers (channel_id, username, created_at) VALUES (?, ?, ?)",
+        (channel_id, user, now),
+    )
+    conn.execute(
+        "INSERT INTO tg_posts (channel_id, author, text, created_at) VALUES (?, ?, ?, ?)",
+        (channel_id, user, f"Канал «{name}» создан. Здесь будут публикации.", now),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM tg_channels WHERE id = ?", (channel_id,)).fetchone()
+    payload = _tg_channel_payload(conn, row, user)
+    conn.close()
+    return {"ok": True, "channel": payload}
+
+
+@app.get("/api/tg/channels/{channel_id}")
+async def get_tg_channel(channel_id: int, user: str = Depends(auth_user)):
+    conn = db_connect()
+    row = conn.execute("SELECT * FROM tg_channels WHERE id = ?", (channel_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Канал не найден")
+    if not row["is_public"] and row["owner"] != user and not conn.execute(
+        "SELECT 1 FROM tg_subscribers WHERE channel_id = ? AND username = ?", (channel_id, user)
+    ).fetchone():
+        conn.close()
+        raise HTTPException(403, "Это закрытый канал")
+
+    channel = _tg_channel_payload(conn, row, user)
+    posts = [_tg_post_dict(p) for p in conn.execute(
+        "SELECT * FROM tg_posts WHERE channel_id = ? ORDER BY id DESC LIMIT 100", (channel_id,)
+    ).fetchall()][::-1]
+    conn.close()
+    return {"channel": channel, "posts": posts}
+
+
+@app.post("/api/tg/channels/{channel_id}/posts")
+async def create_tg_post(channel_id: int, data: TgPostIn, user: str = Depends(auth_user)):
+    text = (data.text or "").strip()
+    if not text:
+        raise HTTPException(400, "Пустой пост")
+    if len(text) > MAX_TG_POST:
+        raise HTTPException(400, "Пост слишком длинный")
+
+    conn = db_connect()
+    row = conn.execute("SELECT owner, name FROM tg_channels WHERE id = ?", (channel_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Канал не найден")
+    if row["owner"] != user:
+        conn.close()
+        raise HTTPException(403, "Публиковать может только владелец канала")
+
+    cur = conn.execute(
+        "INSERT INTO tg_posts (channel_id, author, text, created_at) VALUES (?, ?, ?, ?)",
+        (channel_id, user, text, int(time.time())),
+    )
+    post_id = cur.lastrowid
+    conn.commit()
+    post = _tg_post_dict(conn.execute("SELECT * FROM tg_posts WHERE id = ?", (post_id,)).fetchone())
+    subscribers = [r["username"] for r in conn.execute(
+        "SELECT username FROM tg_subscribers WHERE channel_id = ?", (channel_id,)
+    ).fetchall()]
+    conn.close()
+
+    payload = {
+        "type": "tg_post",
+        "channel_id": channel_id,
+        "channel_name": row["name"],
+        "post": post,
+    }
+    for username in subscribers:
+        await send_to_user(username, payload)
+    return {"ok": True, "post": post}
+
+
+@app.post("/api/tg/posts/{post_id}/edit")
+async def edit_tg_post(post_id: int, data: TgPostEdit, user: str = Depends(auth_user)):
+    text = (data.text or "").strip()
+    if not text:
+        raise HTTPException(400, "Пустой пост")
+
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT p.id, p.channel_id, c.owner FROM tg_posts p "
+        "JOIN tg_channels c ON c.id = p.channel_id WHERE p.id = ?",
+        (post_id,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Пост не найден")
+    if row["owner"] != user:
+        conn.close()
+        raise HTTPException(403, "Это не твой канал")
+
+    conn.execute("UPDATE tg_posts SET text = ?, edited = 1 WHERE id = ?", (text, post_id))
+    conn.commit()
+    post = _tg_post_dict(conn.execute("SELECT * FROM tg_posts WHERE id = ?", (post_id,)).fetchone())
+    subscribers = [r["username"] for r in conn.execute(
+        "SELECT username FROM tg_subscribers WHERE channel_id = ?", (row["channel_id"],)
+    ).fetchall()]
+    conn.close()
+
+    for username in subscribers:
+        await send_to_user(username, {"type": "tg_post_updated", "channel_id": row["channel_id"], "post": post})
+    return {"ok": True, "post": post}
+
+
+@app.delete("/api/tg/posts/{post_id}")
+async def delete_tg_post(post_id: int, user: str = Depends(auth_user)):
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT p.channel_id, c.owner FROM tg_posts p JOIN tg_channels c ON c.id = p.channel_id "
+        "WHERE p.id = ?",
+        (post_id,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Пост не найден")
+    if row["owner"] != user:
+        conn.close()
+        raise HTTPException(403, "Это не твой канал")
+
+    conn.execute("UPDATE tg_posts SET deleted = 1, text = '' WHERE id = ?", (post_id,))
+    conn.commit()
+    subscribers = [r["username"] for r in conn.execute(
+        "SELECT username FROM tg_subscribers WHERE channel_id = ?", (row["channel_id"],)
+    ).fetchall()]
+    conn.close()
+
+    for username in subscribers:
+        await send_to_user(username, {
+            "type": "tg_post_updated",
+            "channel_id": row["channel_id"],
+            "post": {"id": post_id, "channel_id": row["channel_id"], "author": user,
+                     "text": "", "edited": 0, "deleted": 1, "created_at": int(time.time())},
+        })
+    return {"ok": True}
+
+
+class TgChannelUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    is_public: Optional[bool] = None
+
+
+@app.post("/api/tg/channels/{channel_id}/update")
+async def update_tg_channel(channel_id: int, data: TgChannelUpdate, user: str = Depends(auth_user)):
+    conn = db_connect()
+    row = conn.execute("SELECT * FROM tg_channels WHERE id = ?", (channel_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Канал не найден")
+    if row["owner"] != user:
+        conn.close()
+        raise HTTPException(403, "Это не твой канал")
+
+    name = (data.name or "").strip()[:40] if data.name is not None else row["name"]
+    if len(name) < 2:
+        conn.close()
+        raise HTTPException(400, "Название — минимум 2 символа")
+    description = (data.description or "").strip()[:300] if data.description is not None else row["description"]
+    is_public = int(bool(data.is_public)) if data.is_public is not None else row["is_public"]
+
+    conn.execute(
+        "UPDATE tg_channels SET name = ?, description = ?, is_public = ? WHERE id = ?",
+        (name, description, is_public, channel_id),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM tg_channels WHERE id = ?", (channel_id,)).fetchone()
+    payload = _tg_channel_payload(conn, row, user)
+    conn.close()
+    return {"ok": True, "channel": payload}
+
+
+@app.post("/api/tg/channels/{channel_id}/subscribe")
+async def subscribe_tg(channel_id: int, user: str = Depends(auth_user)):
+    conn = db_connect()
+    row = conn.execute("SELECT owner, is_public FROM tg_channels WHERE id = ?", (channel_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Канал не найден")
+    if not row["is_public"] and row["owner"] != user:
+        conn.close()
+        raise HTTPException(403, "Это закрытый канал")
+    try:
+        conn.execute(
+            "INSERT INTO tg_subscribers (channel_id, username, created_at) VALUES (?, ?, ?)",
+            (channel_id, user, int(time.time())),
+        )
+    except sqlite3.IntegrityError:
+        pass
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/tg/channels/{channel_id}/unsubscribe")
+async def unsubscribe_tg(channel_id: int, user: str = Depends(auth_user)):
+    conn = db_connect()
+    row = conn.execute("SELECT owner FROM tg_channels WHERE id = ?", (channel_id,)).fetchone()
+    if row and row["owner"] == user:
+        conn.close()
+        raise HTTPException(400, "Владелец не может отписаться от своего канала")
+    conn.execute(
+        "DELETE FROM tg_subscribers WHERE channel_id = ? AND username = ?", (channel_id, user)
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/tg/channels/{channel_id}/read")
+async def read_tg_channel(channel_id: int, user: str = Depends(auth_user)):
+    conn = db_connect()
+    last_id = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) FROM tg_posts WHERE channel_id = ?", (channel_id,)
+    ).fetchone()[0]
+    conn.execute(
+        """
+        INSERT INTO tg_read (username, channel_id, last_read_id) VALUES (?, ?, ?)
+        ON CONFLICT(username, channel_id) DO UPDATE SET last_read_id =
+            MAX(tg_read.last_read_id, excluded.last_read_id)
+        """,
+        (user, channel_id, last_id),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "last_read_id": last_id}
+
+
+@app.delete("/api/tg/channels/{channel_id}")
+async def delete_tg_channel(channel_id: int, user: str = Depends(auth_user)):
+    conn = db_connect()
+    row = conn.execute("SELECT owner FROM tg_channels WHERE id = ?", (channel_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Канал не найден")
+    if row["owner"] != user:
+        conn.close()
+        raise HTTPException(403, "Это не твой канал")
+
+    subscribers = [r["username"] for r in conn.execute(
+        "SELECT username FROM tg_subscribers WHERE channel_id = ?", (channel_id,)
+    ).fetchall()]
+    conn.execute("DELETE FROM tg_posts WHERE channel_id = ?", (channel_id,))
+    conn.execute("DELETE FROM tg_subscribers WHERE channel_id = ?", (channel_id,))
+    conn.execute("DELETE FROM tg_read WHERE channel_id = ?", (channel_id,))
+    conn.execute("DELETE FROM tg_channels WHERE id = ?", (channel_id,))
+    conn.commit()
+    conn.close()
+
+    for username in subscribers:
+        await send_to_user(username, {"type": "tg_channel_deleted", "channel_id": channel_id})
+    return {"ok": True}
+
+
 # ============================================
 # WEBSOCKET — ОТПРАВКА
 # ============================================
@@ -1449,6 +2612,188 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(defa
                 if not are_friends(username, to_user):
                     continue
                 await send_to_user(to_user, {"type": "typing", "from": username})
+
+
+            # ---------- СООБЩЕНИЯ В КАНАЛАХ СЕРВЕРА ----------
+            elif msg_type == "server_message":
+                try:
+                    channel_id = int(msg.get("channel_id"))
+                except (TypeError, ValueError):
+                    continue
+                text = str(msg.get("text", "")).strip()
+                client_id = msg.get("client_id")
+
+                if not text or len(text) > MAX_SERVER_MSG:
+                    await websocket.send_text(json.dumps({
+                        "type": "error", "client_id": client_id, "text": "Пустое или слишком длинное сообщение",
+                    }, ensure_ascii=False))
+                    continue
+
+                conn = db_connect()
+                ch = conn.execute(
+                    "SELECT id, server_id FROM server_channels WHERE id = ?", (channel_id,)
+                ).fetchone()
+                if not ch:
+                    conn.close()
+                    continue
+                server_id = ch["server_id"]
+                if not server_role(server_id, username):
+                    conn.close()
+                    await websocket.send_text(json.dumps({
+                        "type": "error", "client_id": client_id, "text": "Ты не участник этого сервера",
+                    }, ensure_ascii=False))
+                    continue
+
+                cur = conn.execute(
+                    "INSERT INTO server_messages (channel_id, from_user, text, client_id, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (channel_id, username, text, client_id, int(time.time())),
+                )
+                msg_id = cur.lastrowid
+                conn.commit()
+                row = conn.execute(
+                    "SELECT id, channel_id, from_user, text, edited, deleted, client_id, created_at "
+                    "FROM server_messages WHERE id = ?",
+                    (msg_id,),
+                ).fetchone()
+                payload = {"type": "server_message", "server_id": server_id,
+                           **_server_message_dict(row, conn)}
+                conn.close()
+
+                await broadcast_to_server(server_id, payload)
+
+            elif msg_type == "server_edit_msg":
+                try:
+                    mid = int(msg.get("id"))
+                except (TypeError, ValueError):
+                    continue
+                text = str(msg.get("text", "")).strip()
+                if not text or len(text) > MAX_SERVER_MSG:
+                    continue
+
+                conn = db_connect()
+                row = conn.execute(
+                    "SELECT m.id, m.from_user, m.channel_id, c.server_id FROM server_messages m "
+                    "JOIN server_channels c ON c.id = m.channel_id WHERE m.id = ?",
+                    (mid,),
+                ).fetchone()
+                if not row or row["from_user"] != username:
+                    conn.close()
+                    continue
+
+                conn.execute("UPDATE server_messages SET text = ?, edited = 1 WHERE id = ?", (text, mid))
+                conn.commit()
+                updated = conn.execute(
+                    "SELECT id, channel_id, from_user, text, edited, deleted, client_id, created_at "
+                    "FROM server_messages WHERE id = ?",
+                    (mid,),
+                ).fetchone()
+                payload = {"type": "server_message_updated", "server_id": row["server_id"],
+                           **_server_message_dict(updated, conn)}
+                conn.close()
+                await broadcast_to_server(row["server_id"], payload)
+
+            elif msg_type == "server_delete_msg":
+                try:
+                    mid = int(msg.get("id"))
+                except (TypeError, ValueError):
+                    continue
+
+                conn = db_connect()
+                row = conn.execute(
+                    "SELECT m.id, m.from_user, m.channel_id, c.server_id FROM server_messages m "
+                    "JOIN server_channels c ON c.id = m.channel_id WHERE m.id = ?",
+                    (mid,),
+                ).fetchone()
+                if not row:
+                    conn.close()
+                    continue
+
+                can_delete = row["from_user"] == username or can_manage_server(row["server_id"], username)
+                if not can_delete:
+                    conn.close()
+                    continue
+
+                conn.execute("UPDATE server_messages SET deleted = 1, text = '' WHERE id = ?", (mid,))
+                conn.commit()
+                updated = conn.execute(
+                    "SELECT id, channel_id, from_user, text, edited, deleted, client_id, created_at "
+                    "FROM server_messages WHERE id = ?",
+                    (mid,),
+                ).fetchone()
+                payload = {"type": "server_message_updated", "server_id": row["server_id"],
+                           **_server_message_dict(updated, conn)}
+                conn.close()
+                await broadcast_to_server(row["server_id"], payload)
+
+            elif msg_type == "server_typing":
+                try:
+                    channel_id = int(msg.get("channel_id"))
+                except (TypeError, ValueError):
+                    continue
+                conn = db_connect()
+                ch = conn.execute(
+                    "SELECT server_id FROM server_channels WHERE id = ?", (channel_id,)
+                ).fetchone()
+                conn.close()
+                if not ch or not server_role(ch["server_id"], username):
+                    continue
+                await broadcast_to_server(
+                    ch["server_id"],
+                    {"type": "server_typing", "channel_id": channel_id, "from": username},
+                    exclude=username,
+                )
+
+            # ---------- ЗВОНКИ (WebRTC-СИГНАЛИНГ) ----------
+            elif msg_type == "call":
+                action = str(msg.get("action", "")).strip()
+                call_id = str(msg.get("call_id", "")).strip()[:64]
+                target = str(msg.get("to", "")).strip().lower()
+
+                if action == "invite":
+                    if not target or not call_id:
+                        continue
+                    if not user_exists(target):
+                        await websocket.send_text(json.dumps({
+                            "type": "call_error", "call_id": call_id, "text": "Пользователь не найден",
+                        }, ensure_ascii=False))
+                        continue
+                    if not can_call(username, target):
+                        await websocket.send_text(json.dumps({
+                            "type": "call_error", "call_id": call_id,
+                            "text": "Звонить можно друзьям и участникам своих серверов",
+                        }, ensure_ascii=False))
+                        continue
+
+                    await send_to_user(target, {
+                        "type": "call_incoming",
+                        "call_id": call_id,
+                        "from": username,
+                        "from_name": (get_user(username) or {}).get("display_name", username),
+                        "video": bool(msg.get("video")),
+                        "screen": bool(msg.get("screen")),
+                    })
+                    continue
+
+                if action in ("accept", "reject", "end", "busy", "signal"):
+                    if not target:
+                        continue
+                    payload = {
+                        "type": "call_" + action,
+                        "call_id": call_id,
+                        "from": username,
+                    }
+                    if action == "signal":
+                        payload["data"] = msg.get("data")
+                        payload["kind"] = msg.get("kind")
+                    if action == "end":
+                        payload["reason"] = msg.get("reason", "")
+                    await send_to_user(target, payload)
+                    continue
+
+            # ---------- ПЕЧАТАЕТ В КАНАЛЕ ----------
+            elif msg_type == "tg_typing":
+                continue
 
             # ---------- ЗАГЛУШКА ДЛЯ ПИНГА ----------
             elif msg_type == "ping":

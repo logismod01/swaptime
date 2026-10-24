@@ -65,6 +65,24 @@ const BANNER_LABELS = {
   mono: "Mono",
 };
 
+const FALLBACK_THEMES = [
+  "midnight", "ocean", "emerald", "violet", "sunset",
+  "cyber", "coffee", "mono", "aurora", "cherry",
+];
+
+const THEME_LABELS = {
+  midnight: "Midnight Red",
+  ocean: "Deep Ocean",
+  emerald: "Emerald",
+  violet: "Violet Dream",
+  sunset: "Sunset",
+  cyber: "Cyberpunk",
+  coffee: "Coffee",
+  mono: "Mono",
+  aurora: "Aurora",
+  cherry: "Cherry Blossom",
+};
+
 const COLOR_PRESETS = [
   "#e53935", "#ff7043", "#f0b232", "#3ba55d",
   "#22d3ee", "#3b82f6", "#8b5cf6", "#ec4899",
@@ -85,8 +103,21 @@ const state = {
   fonts: FALLBACK_FONTS.slice(),
   frames: FALLBACK_FRAMES.slice(),
   banners: FALLBACK_BANNERS.slice(),
+  themes: FALLBACK_THEMES.slice(),
+  theme: localStorage.getItem("swaptime_theme") || "midnight",
 
-  view: "chats",          // chats | friends
+  servers: [],
+  activeServer: null,     // id
+  serverData: null,       // полный объект сервера
+  activeChannel: null,    // id
+  tgChannels: [],
+  activeTg: null,         // id
+  tgData: null,
+
+  callSettings: null,
+
+  view: "chats",          // chats | friends | tg | server
+  booted: false,
   friendsTab: "all",      // all | online | pending | blocked
   current: null,
   messages: new Map(),
@@ -360,9 +391,18 @@ function applyFont(font) {
 }
 
 function applyTheme() {
-  if (!state.user) return;
-  applyFont(state.user.font_family);
+  applyColorTheme(state.user ? state.user.theme : state.theme);
+  if (state.user) applyFont(state.user.font_family);
   renderMeBar();
+}
+
+function applyColorTheme(theme) {
+  const value = FALLBACK_THEMES.includes(theme) ? theme : FALLBACK_THEMES[0];
+  state.theme = value;
+  document.documentElement.dataset.theme = value;
+  try {
+    localStorage.setItem("swaptime_theme", value);
+  } catch (err) {}
 }
 
 function renderMeBar() {
@@ -517,11 +557,14 @@ async function enterApp() {
     state.fonts = data.fonts && data.fonts.length ? data.fonts : FALLBACK_FONTS;
     state.frames = data.frames && data.frames.length ? data.frames : FALLBACK_FRAMES;
     state.banners = data.banners && data.banners.length ? data.banners : FALLBACK_BANNERS;
+    state.themes = data.themes && data.themes.length ? data.themes : FALLBACK_THEMES;
     localStorage.setItem("swaptime_user", JSON.stringify(state.user));
     applyTheme();
   } catch (err) {
     if (err.status === 401) return;
   }
+
+  if (typeof initCallSettings === "function") initCallSettings();
 
   await refreshChats();
   connectWS();
@@ -556,6 +599,13 @@ async function refreshChats() {
     renderTitle();
   } catch (err) {
     if (err.status !== 401) toast(err.message || "Не удалось загрузить чаты", "error");
+  }
+
+  if (typeof refreshServers === "function") {
+    try { await refreshServers(); } catch (err) {}
+  }
+  if (typeof refreshTgChannels === "function") {
+    try { await refreshTgChannels(); } catch (err) {}
   }
 }
 
@@ -599,30 +649,84 @@ function renderRail() {
   reqBadge.hidden = state.requests.length === 0;
   reqBadge.textContent = String(state.requests.length);
 
-  const contacts = $("rail-contacts");
-  clear(contacts);
-  state.chats
-    .filter((chat) => chat.online)
-    .slice(0, 8)
-    .forEach((chat) => {
-      const btn = el("button", "rail-contact");
-      btn.title = chat.display_name || chat.username;
-      btn.appendChild(avatarNode(chat, "", { frame: chat.avatar_frame }));
-      btn.addEventListener("click", () => {
-        setView("chats");
-        openChat(chat.username);
-      });
-      contacts.appendChild(btn);
-    });
+  const tgBadge = $("rail-tg");
+  const tgUnread = state.tgChannels.reduce((sum, c) => sum + (c.unread || 0), 0);
+  if (tgBadge) {
+    tgBadge.hidden = tgUnread === 0;
+    tgBadge.textContent = tgUnread > 99 ? "99+" : String(tgUnread);
+  }
+
+  renderServerRail();
 }
 
-function setView(view) {
+function renderServerRail() {
+  const list = $("server-list");
+  if (!list) return;
+  clear(list);
+
+  (state.servers || []).forEach((server) => {
+    const btn = el("button", "rail-btn server-btn");
+    btn.title = server.name;
+    btn.dataset.serverId = String(server.id);
+    if (state.view === "server" && state.activeServer === server.id) btn.classList.add("active");
+
+    if (server.icon) {
+      btn.appendChild(el("span", "server-icon-emoji", server.icon));
+    } else {
+      btn.appendChild(el("span", "server-icon-letter", initial(server.name)));
+    }
+    btn.style.setProperty("--server-color", safeColor(server.icon_color));
+
+    if (server.unread > 0) {
+      btn.appendChild(el("span", "rail-badge", server.unread > 99 ? "99+" : String(server.unread)));
+    }
+
+    btn.addEventListener("click", () => openServer(server.id));
+    list.appendChild(btn);
+  });
+}
+
+function moveMeBar(target) {
+  const bar = $("me-bar");
+  if (!bar || !target || bar.parentElement === target) return;
+  target.appendChild(bar);
+}
+
+function setView(view, options = {}) {
   state.view = view;
+
+  const isServer = view === "server";
+  $("home-sidebar").style.display = isServer ? "none" : "flex";
+  $("server-sidebar").style.display = isServer ? "flex" : "none";
+  moveMeBar(isServer ? $("server-sidebar") : $("home-sidebar"));
+
   $("chats-view").style.display = view === "chats" ? "block" : "none";
   $("friends-view").style.display = view === "friends" ? "block" : "none";
-  $("sidebar-title").textContent = view === "chats" ? "Личные сообщения" : "Друзья";
+  $("tg-sidebar").style.display = view === "tg" ? "block" : "none";
+
+  $("home-chat").style.display = isServer || view === "tg" ? "none" : "flex";
+  $("server-view").style.display = isServer ? "flex" : "none";
+  $("tg-view").style.display = view === "tg" ? "flex" : "none";
+
+  const titles = {
+    chats: ["Личные сообщения", "DM", "Поиск по друзьям…"],
+    friends: ["Друзья", "DM", "Найти друга…"],
+    tg: ["Каналы", "TG", "Поиск по каналам…"],
+    server: ["Сервер", "", "Поиск по каналам…"],
+  };
+  const [title, tag, placeholder] = titles[view] || titles.chats;
+  $("sidebar-title").textContent = title;
+  $("sidebar-tag").textContent = tag;
+  $("sidebar-tag").style.display = tag ? "" : "none";
+  $("search-users").placeholder = placeholder;
+
+  if (!isServer) {
+    $("members-panel").style.display = "none";
+  }
+
   renderRail();
   renderSidebar();
+  if (view === "tg" && typeof renderTgList === "function") renderTgList();
 }
 
 // ============================================================
@@ -1414,6 +1518,38 @@ function handleSocketMessage(msg) {
     case "profile_updated": onFriendProfileUpdated(msg.user); break;
     case "error": handleServerError(msg); break;
     case "pong": break;
+
+    // ---- серверы ----
+    case "server_message":
+    case "server_message_updated":
+    case "server_channels_changed":
+    case "server_member_joined":
+    case "server_member_left":
+    case "server_members_changed":
+    case "server_updated":
+    case "server_typing":
+    case "server_left":
+      if (typeof handleServerEvent === "function") handleServerEvent(msg);
+      break;
+
+    // ---- Telegram-каналы ----
+    case "tg_post":
+    case "tg_post_updated":
+    case "tg_channel_deleted":
+      if (typeof handleTgEvent === "function") handleTgEvent(msg);
+      break;
+
+    // ---- звонки ----
+    case "call_incoming":
+    case "call_accept":
+    case "call_reject":
+    case "call_end":
+    case "call_busy":
+    case "call_signal":
+    case "call_error":
+      if (typeof handleCallEvent === "function") handleCallEvent(msg);
+      break;
+
     default: break;
   }
 }
@@ -1691,6 +1827,12 @@ function renderProfileCard(data) {
   $("profile-ignore-btn").textContent = data.ignored_by_me ? "🔔 Убрать игнор" : "🔇 Игнорировать";
   $("profile-block-btn").textContent = data.blocked_by_me ? "✅ Разблокировать" : "🚫 Заблокировать";
 
+  const callBtn = $("profile-call-btn");
+  if (callBtn) {
+    const canCall = data.can_call !== undefined ? data.can_call : isFriend;
+    callBtn.style.display = isMe || data.blocked_by_me || !canCall ? "none" : "";
+  }
+
   if (isMe) $("profile-error").textContent = "";
 }
 
@@ -1822,6 +1964,7 @@ function openSettings(tab = "profile") {
     banner: state.user.banner || "crimson",
     bio: state.user.bio || "",
     font_family: state.user.font_family || FALLBACK_FONTS[0],
+    theme: state.user.theme || state.theme || "midnight",
   };
   state.pendingAvatar = undefined;
 
@@ -1835,6 +1978,7 @@ function openSettings(tab = "profile") {
   renderColorPresets();
   renderFrames();
   renderBanners();
+  renderThemeGrid();
   renderFontOptions(state.draft.font_family);
   renderSettingsAvatar();
 
@@ -1925,6 +2069,28 @@ function renderBanners() {
       state.draft.banner = banner;
       renderBanners();
       renderSettingsAvatar();
+    });
+    grid.appendChild(option);
+  });
+}
+
+function renderThemeGrid() {
+  const grid = $("theme-grid");
+  if (!grid) return;
+  clear(grid);
+  const themes = state.themes && state.themes.length ? state.themes : FALLBACK_THEMES;
+
+  themes.forEach((theme) => {
+    const option = el("button", "theme-option theme-preview-" + theme + (state.draft.theme === theme ? " selected" : ""));
+    option.type = "button";
+    option.title = THEME_LABELS[theme] || theme;
+    option.appendChild(el("span", "theme-swatch"));
+    option.appendChild(el("span", "theme-name", THEME_LABELS[theme] || theme));
+
+    option.addEventListener("click", () => {
+      state.draft.theme = theme;
+      applyColorTheme(theme); // живой предпросмотр всей темы
+      renderThemeGrid();
     });
     grid.appendChild(option);
   });
@@ -2105,6 +2271,7 @@ async function saveSettings() {
         banner: state.draft.banner,
         bio: $("settings-bio").value.trim(),
         font_family: $("settings-font").value,
+        theme: state.draft.theme,
       },
     });
     applyUserUpdate(data.user);
@@ -2209,6 +2376,51 @@ const ACTIONS = {
   "remove-friend": () => removeCurrentFriend(),
   "pick-avatar": () => pickAvatarFile(),
   "remove-avatar": () => removeAvatar(),
+
+  // серверы
+  "create-server": () => openServerModal(),
+  "close-server-modal": () => closeModal("server-modal"),
+  "save-server": () => saveServer(),
+  "server-menu": () => openServerMenu(),
+  "close-server-menu": () => closeModal("server-menu-modal"),
+  "create-server-channel": () => openChannelModal(),
+  "close-channel-modal": () => closeModal("channel-modal"),
+  "save-channel": () => saveChannel(),
+  "copy-invite": () => copyInvite(),
+  "leave-server": () => leaveServer(),
+  "delete-server": () => deleteServer(),
+  "edit-server": () => editServer(),
+  "open-join-modal": () => openJoinModal(),
+  "close-join-modal": () => closeModal("join-server-modal"),
+  "join-server": () => joinServer(),
+  "toggle-members": () => toggleMembers(),
+  "close-server-chat": () => { setView("chats"); },
+
+  // каналы (telegram)
+  "create-channel": () => openTgModal(),
+  "close-tg-modal": () => closeModal("tg-modal"),
+  "save-tg-channel": () => saveTgChannel(),
+  "delete-tg-channel": () => deleteTgChannel(),
+  "discover-channels": () => openDiscover(),
+  "close-discover": () => closeModal("discover-modal"),
+  "tg-subscribe": () => toggleTgSubscription(),
+  "tg-settings": () => openTgSettings(),
+  "publish-post": () => publishPost(),
+  "close-tg": () => { setView("chats"); },
+
+  // звонки
+  "start-audio-call": () => startCall({ video: false }),
+  "start-video-call": () => startCall({ video: true }),
+  "call-from-profile": () => { const u = state.profileData; closeProfile(); if (u) startCall({ video: true, withUser: u.username }); },
+  "accept-call": () => acceptIncomingCall(),
+  "reject-call": () => rejectIncomingCall(),
+  "toggle-mic": () => toggleMic(),
+  "toggle-cam": () => toggleCam(),
+  "toggle-screen": () => toggleScreenShare(),
+  "hangup": () => hangupCall(),
+  "open-call-settings": () => toggleCallSettingsPanel(),
+  "apply-call-settings": () => applyCallSettings(),
+  "start-call-from-server": () => toast("Выбери участника справа и нажми «Позвонить»", "info"),
 };
 
 function bindEvents() {
@@ -2246,6 +2458,8 @@ function bindEvents() {
     btn.addEventListener("click", () => setView(btn.dataset.view));
   });
 
+  $("add-server-btn") && $("add-server-btn").addEventListener("click", () => openServerModal());
+
   document.querySelectorAll(".ftab").forEach((tab) => {
     tab.addEventListener("click", () => {
       state.friendsTab = tab.dataset.tab;
@@ -2269,7 +2483,42 @@ function bindEvents() {
   });
   input.addEventListener("input", sendTyping);
 
-  $("search-users").addEventListener("input", renderDMList);
+  $("search-users").addEventListener("input", () => {
+    if (state.view === "friends") renderFriendsPanel();
+    else if (state.view === "tg" && typeof renderTgList === "function") renderTgList();
+    else if (state.view === "server" && typeof renderServerChannels === "function") renderServerChannels();
+    else renderDMList();
+  });
+
+  $("server-input") && $("server-input").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      if (typeof sendServerMessage === "function") sendServerMessage();
+    }
+  });
+  $("server-input") &&
+    $("server-input").addEventListener("input", () => {
+      if (typeof sendServerTyping === "function") sendServerTyping();
+    });
+  $("server-send-btn") &&
+    $("server-send-btn").addEventListener("click", () => {
+      if (typeof sendServerMessage === "function") sendServerMessage();
+    });
+
+  $("tg-post-input") && $("tg-post-input").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      if (typeof publishPost === "function") publishPost();
+    }
+  });
+
+  $("invite-code-input") && $("invite-code-input").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && typeof joinServer === "function") joinServer();
+  });
+  $("discover-input") &&
+    $("discover-input").addEventListener("input", () => {
+      if (typeof searchDiscover === "function") searchDiscover();
+    });
 
   $("friend-username").addEventListener("keydown", (event) => {
     if (event.key === "Enter") sendFriendRequest();
@@ -2340,9 +2589,12 @@ function bindEvents() {
 // ИНИЦИАЛИЗАЦИЯ
 // ============================================================
 document.addEventListener("DOMContentLoaded", async () => {
+  if (state.booted) return; // jsdom/некоторые браузеры могут кинуть событие дважды
+  state.booted = true;
   bindEvents();
   generateCaptcha();
   applyFont(FALLBACK_FONTS[0]);
+  applyColorTheme(state.theme);
 
   const lastName = localStorage.getItem("swaptime_last_user");
   if (lastName) $("login-username").value = lastName;
@@ -2358,6 +2610,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     state.fonts = data.fonts && data.fonts.length ? data.fonts : FALLBACK_FONTS;
     state.frames = data.frames && data.frames.length ? data.frames : FALLBACK_FRAMES;
     state.banners = data.banners && data.banners.length ? data.banners : FALLBACK_BANNERS;
+    state.themes = data.themes && data.themes.length ? data.themes : FALLBACK_THEMES;
     localStorage.setItem("swaptime_user", JSON.stringify(state.user));
     enterApp();
   } catch (err) {
