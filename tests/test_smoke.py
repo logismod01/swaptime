@@ -1,0 +1,277 @@
+"""
+Смоук-тесты СвапТайм.
+
+Запуск:
+    python -m pytest tests -q
+или без pytest:
+    python tests/test_smoke.py
+
+Тест сам поднимает uvicorn на свободном порту с временной базой данных,
+чтобы не трогать data/swaptime.db.
+"""
+import asyncio
+import json
+import os
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+import httpx
+import websockets
+
+ROOT = Path(__file__).resolve().parent.parent
+PY = sys.executable
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class Server:
+    def __init__(self):
+        self.port = free_port()
+        self.db = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+        os.unlink(self.db)
+        self.proc = None
+
+    def __enter__(self):
+        env = dict(os.environ, SWAPTIME_DB=self.db, PORT=str(self.port))
+        self.proc = subprocess.Popen(
+            [PY, "-m", "uvicorn", "backend.server:app", "--host", "127.0.0.1",
+             "--port", str(self.port), "--log-level", "warning"],
+            cwd=str(ROOT), env=env,
+        )
+        base = f"http://127.0.0.1:{self.port}"
+        deadline = time.time() + 25
+        while time.time() < deadline:
+            try:
+                httpx.get(base + "/", timeout=1.0)
+                return self
+            except Exception:
+                time.sleep(0.2)
+        raise RuntimeError("Сервер не поднялся")
+
+    def __exit__(self, *exc):
+        if self.proc:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+        try:
+            os.unlink(self.db)
+        except OSError:
+            pass
+
+    @property
+    def http(self):
+        return f"http://127.0.0.1:{self.port}"
+
+    @property
+    def ws(self):
+        return f"ws://127.0.0.1:{self.port}/ws"
+
+
+def register(client: httpx.Client, name: str, password="pass1234"):
+    return client.post("/api/register", json={
+        "username": name, "password": password, "display_name": name.title(), "email": f"{name}@mail.ru",
+    })
+
+
+def auth(token: str):
+    return {"Authorization": f"Bearer {token}"}
+
+
+async def wait_msg(ws, msg_type=None, timeout=4.0, skip=0):
+    """Ждёт сообщение нужного типа, пропуская служебные (presence/pong)."""
+    seen = 0
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        raw = await asyncio.wait_for(ws.recv(), timeout=max(0.1, deadline - asyncio.get_event_loop().time()))
+        data = json.loads(raw)
+        if msg_type and data.get("type") != msg_type:
+            continue
+        if seen < skip:
+            seen += 1
+            continue
+        return data
+    raise AssertionError(f"не дождались {msg_type}")
+
+
+async def scenario(base: str, ws_url: str):
+    with httpx.Client(base_url=base, timeout=10) as c:
+        # ---------- регистрация ----------
+        r = register(c, "alice")
+        assert r.status_code == 200, r.text
+        alice = r.json()
+        r = register(c, "bob")
+        assert r.status_code == 200, r.text
+        bob = r.json()
+        r = register(c, "carol")
+        carol = r.json()
+        assert len(alice["user"]["username"]) >= 3
+
+        # ник с html/спецсимволами не должен пройти
+        bad = c.post("/api/register", json={"username": "<script>", "password": "1234"})
+        assert bad.status_code == 400
+
+        # ---------- авторизация ----------
+        assert c.get("/api/me").status_code == 401
+        assert c.get("/api/me", headers=auth("nope")).status_code == 401
+        me = c.get("/api/me", headers=auth(alice["token"])).json()
+        assert me["user"]["username"] == "alice"
+        assert len(me["fonts"]) == 10, me["fonts"]
+
+        # чужой чат читать нельзя
+        r = c.get("/api/messages/bob/carol", headers=auth(alice["token"]))
+        assert r.status_code == 403, r.text
+
+        # профиль без токена менять нельзя
+        r = c.post("/api/update_profile", json={"display_name": "hack"})
+        assert r.status_code == 401
+
+        # ---------- друзья ----------
+        r = c.post("/api/friends/request", json={"to_user": "bob"}, headers=auth(alice["token"]))
+        assert r.status_code == 200, r.text
+
+        r = c.get("/api/friends", headers=auth(bob["token"])).json()
+        assert [u["username"] for u in r["requests"]] == ["alice"], r
+
+        r = c.post("/api/friends/accept", json={"to_user": "alice"}, headers=auth(bob["token"]))
+        assert r.status_code == 200, r.text
+
+        chats = c.get("/api/chats", headers=auth(bob["token"])).json()["chats"]
+        assert [ch["username"] for ch in chats] == ["alice"], chats
+
+        # ---------- websocket: сообщения ----------
+        async with websockets.connect(f"{ws_url}?token={alice['token']}") as wa, \
+                   websockets.connect(f"{ws_url}?token={bob['token']}") as wb:
+
+            # пропускаем presence
+            await wait_msg(wa, "presence")
+            await wait_msg(wb, "presence")
+
+            payload = {"type": "message", "to": "bob", "text": "привет!", "client_id": "c-1"}
+            await wa.send(json.dumps(payload))
+
+            got_bob = await wait_msg(wb, "message")
+            got_alice = await wait_msg(wa, "message")
+            assert got_bob["id"] == got_alice["id"]
+            assert got_bob["text"] == "привет!"
+            assert got_bob["client_id"] == "c-1"
+            msg_id = got_bob["id"]
+
+            # повторная отправка того же client_id не создаёт дубль
+            await wa.send(json.dumps(payload))
+            dup = await wait_msg(wa, "message")
+            assert dup["id"] == msg_id
+
+            # ---------- ответ ----------
+            await wb.send(json.dumps({
+                "type": "message", "to": "alice", "text": "ответ", "reply_to": msg_id, "client_id": "c-2",
+            }))
+            reply = await wait_msg(wa, "message")
+            assert reply["reply_to"] == msg_id
+            assert reply["reply_preview"]["text"] == "привет!"
+            assert reply["reply_preview"]["from"] == "alice"
+
+            # ---------- непрочитанные ----------
+            unread = c.get("/api/unread", headers=auth(alice["token"])).json()["unread"]
+            assert unread.get("bob", 0) >= 1, unread
+
+            c.post("/api/mark_read", json={"to_user": "bob"}, headers=auth(alice["token"]))
+            unread = c.get("/api/unread", headers=auth(alice["token"])).json()["unread"]
+            assert unread.get("bob", 0) == 0, unread
+            chats = c.get("/api/chats", headers=auth(alice["token"])).json()["chats"]
+            assert chats[0]["last_message"]["text"] == "ответ"
+            assert chats[0]["unread"] == 0
+
+            # ---------- редактирование доходит до собеседника ----------
+            await wa.send(json.dumps({"type": "edit_msg", "id": msg_id, "text": "привет (изм)"}))
+            upd_bob = await wait_msg(wb, "message_updated")
+            assert upd_bob["id"] == msg_id
+            assert upd_bob["edited"] == 1
+            assert upd_bob["text"] == "привет (изм)"
+
+            hist = c.get("/api/messages/alice/bob", headers=auth(bob["token"])).json()
+            assert hist[0]["text"] == "привет (изм)"
+
+            # чужое сообщение редактировать нельзя
+            await wb.send(json.dumps({"type": "edit_msg", "id": msg_id, "text": "взлом"}))
+            err = await wait_msg(wb, "error")
+            assert "только свои" in err["text"]
+
+            # ---------- удаление ----------
+            await wa.send(json.dumps({"type": "delete_msg", "id": msg_id}))
+            deleted = await wait_msg(wb, "message_updated")
+            assert deleted["deleted"] == 1
+            assert deleted["text"] == ""
+
+            hist = c.get("/api/messages/alice/bob", headers=auth(bob["token"])).json()
+            assert hist[0]["deleted"] == 1 and hist[0]["text"] == ""
+
+            # ---------- печатает ----------
+            await wa.send(json.dumps({"type": "typing", "to": "bob"}))
+            typing = await wait_msg(wb, "typing")
+            assert typing["from"] == "alice"
+
+            # ---------- писать незнакомцам нельзя ----------
+            async with websockets.connect(f"{ws_url}?token={carol['token']}") as wc:
+                await wait_msg(wc, "presence")
+                await wc.send(json.dumps({"type": "message", "to": "bob", "text": "незнакомец",
+                                          "client_id": "c-0"}))
+                not_friend = await wait_msg(wc, "error")
+                assert "друз" in not_friend["text"], not_friend
+
+            # ---------- игнор ----------
+            c.post("/api/friends/request", json={"to_user": "carol"}, headers=auth(bob["token"]))
+            c.post("/api/friends/accept", json={"to_user": "bob"}, headers=auth(carol["token"]))
+            c.post("/api/friends/ignore", json={"to_user": "carol"}, headers=auth(bob["token"]))
+            async with websockets.connect(f"{ws_url}?token={carol['token']}") as wc:
+                await wait_msg(wc, "presence")
+                await wc.send(json.dumps({"type": "message", "to": "bob", "text": "спам", "client_id": "c-3"}))
+                echo = await wait_msg(wc, "message")
+                assert echo["text"] == "спам"
+                try:
+                    await wait_msg(wb, "message", timeout=1.0)
+                    raise AssertionError("игнорируемое сообщение дошло до bob")
+                except asyncio.TimeoutError:
+                    pass
+
+            # ---------- блокировка ----------
+            r = c.post("/api/friends/block", json={"to_user": "bob"}, headers=auth(alice["token"]))
+            assert r.status_code == 200, r.text
+            await wait_msg(wb, "friend_changed")
+            await wa.send(json.dumps({"type": "message", "to": "bob", "text": "не пройдёт", "client_id": "c-4"}))
+            blocked_err = await wait_msg(wa, "error")
+            assert "блоке" in blocked_err["text"]
+
+            # ---------- шрифты ----------
+            r = c.post("/api/update_profile", json={
+                "display_name": "Алиса", "avatar_color": "#123456", "font_family": "Poppins, sans-serif",
+            }, headers=auth(alice["token"]))
+            assert r.status_code == 200, r.text
+            assert r.json()["user"]["font_family"] == "Poppins, sans-serif"
+            assert r.json()["user"]["avatar_color"] == "#123456"
+
+            # кривой цвет не проходит
+            r = c.post("/api/update_profile", json={
+                "display_name": "Алиса", "avatar_color": "javascript:alert(1)", "font_family": "Poppins, sans-serif",
+            }, headers=auth(alice["token"]))
+            assert r.json()["user"]["avatar_color"] == "#e53935"
+
+    print("✅ Все проверки прошли")
+
+
+def test_full_flow():
+    with Server() as srv:
+        asyncio.run(scenario(srv.http, srv.ws))
+
+
+if __name__ == "__main__":
+    test_full_flow()

@@ -1,30 +1,83 @@
 # ============================================
-# СВАПТАЙМ — BACKEND (v6 — ПОЛНЫЙ)
+# СВАПТАЙМ — BACKEND (v7)
 # ============================================
+# Что изменилось по сравнению с v6:
+#   • токены реально проверяются (раньше можно было менять чужой профиль)
+#   • пароли: PBKDF2-SHA256 + соль (старые SHA-256 хеши поддерживаются
+#     и автоматически обновляются при входе)
+#   • сообщения: client_id (устраняет дубли), reply-превью, время в epoch
+#   • редактирование/удаление доходит до СОБЕСЕДНИКА (раньше — только себе)
+#   • непрочитанные считаются одним запросом и сбрасываются корректно
+#   • онлайн-статус и «печатает…»
+#   • внятные ошибки вместо молчаливого `continue`
+#   • последние 200 сообщений, а не первые 100
+# ============================================
+import os
+import re
+import json
+import time
 import sqlite3
 import hashlib
 import secrets
-import json
 from pathlib import Path
-from datetime import datetime
-from typing import Dict, Set
+from typing import Dict, Optional, Set
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import (
+    FastAPI,
+    WebSocket,
+    WebSocketDisconnect,
+    HTTPException,
+    Header,
+    Query,
+    Depends,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+BASE_DIR = Path(__file__).resolve().parent.parent
+DB_PATH = Path(os.environ.get("SWAPTIME_DB", BASE_DIR / "data" / "swaptime.db"))
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+MAX_MESSAGE_LEN = 4000
+HISTORY_LIMIT = 200
+USERNAME_RE = re.compile(r"^[a-z0-9_]{3,20}$")
+COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+FONT_RE = re.compile(r"^[A-Za-z0-9 ,'\-]{1,80}$")
+
+FONTS = [
+    "Inter, sans-serif",
+    "Roboto, sans-serif",
+    "Montserrat, sans-serif",
+    "Open Sans, sans-serif",
+    "Lato, sans-serif",
+    "Poppins, sans-serif",
+    "Raleway, sans-serif",
+    "Nunito, sans-serif",
+    "Merriweather, serif",
+    "JetBrains Mono, monospace",
+]
+
+
 # ============================================
 # БАЗА ДАННЫХ
 # ============================================
-DB_PATH = Path(__file__).parent.parent / "data" / "swaptime.db"
-DB_PATH.parent.mkdir(exist_ok=True)
+def db_connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, timeout=15)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
-def init_db():
-    """Создаёт таблицы."""
-    conn = sqlite3.connect(DB_PATH)
+def _add_column(c: sqlite3.Cursor, table: str, column: str, decl: str) -> None:
+    """Добавляет колонку, если её нет (мягкая миграция старой базы)."""
+    cols = [r[1] for r in c.execute(f"PRAGMA table_info({table})").fetchall()]
+    if column not in cols:
+        c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
+def init_db() -> None:
+    conn = db_connect()
     c = conn.cursor()
 
     c.execute("""
@@ -36,6 +89,7 @@ def init_db():
             display_name TEXT,
             avatar_color TEXT DEFAULT '#e53935',
             font_family TEXT DEFAULT 'Inter, sans-serif',
+            last_seen INTEGER DEFAULT 0,
             created_at INTEGER NOT NULL
         )
     """)
@@ -49,6 +103,7 @@ def init_db():
             reply_to INTEGER DEFAULT 0,
             edited INTEGER DEFAULT 0,
             deleted INTEGER DEFAULT 0,
+            client_id TEXT,
             created_at INTEGER NOT NULL
         )
     """)
@@ -103,6 +158,15 @@ def init_db():
         )
     """)
 
+    # мягкие миграции старых баз
+    _add_column(c, "users", "last_seen", "INTEGER DEFAULT 0")
+    _add_column(c, "messages", "client_id", "TEXT")
+
+    c.execute("CREATE INDEX IF NOT EXISTS idx_msg_pair ON messages(from_user, to_user, id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_msg_to ON messages(to_user, id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_msg_client ON messages(client_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_friends_user ON friends(user1, user2, status)")
+
     conn.commit()
     conn.close()
     print("✅ База данных готова")
@@ -111,39 +175,108 @@ def init_db():
 init_db()
 
 
+# ============================================
+# ПАРОЛИ
+# ============================================
+PBKDF2_ITERATIONS = 120_000
+
+
 def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
+    salt = secrets.token_hex(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), PBKDF2_ITERATIONS)
+    return f"pbkdf2_sha256${PBKDF2_ITERATIONS}${salt}${dk.hex()}"
 
 
-def get_user(username: str):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT id, username, display_name, avatar_color, font_family FROM users WHERE username = ?", (username,))
-    row = c.fetchone()
+def verify_password(password: str, stored: str) -> bool:
+    """Поддерживает новый формат и старые sha256-хеши."""
+    try:
+        if stored.startswith("pbkdf2_sha256$"):
+            _, iterations, salt, digest = stored.split("$", 3)
+            dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), int(iterations))
+            return secrets.compare_digest(dk.hex(), digest)
+        return secrets.compare_digest(hashlib.sha256(password.encode()).hexdigest(), stored)
+    except (ValueError, TypeError):
+        return False
+
+
+def is_legacy_hash(stored: str) -> bool:
+    return not stored.startswith("pbkdf2_sha256$")
+
+
+def normalize_font(font: str) -> str:
+    """Приводит старые значения ('Roboto', sans-serif) к нашему списку."""
+    if font in FONTS:
+        return font
+    family = (font or "").split(",")[0].strip().strip("'\"")
+    for candidate in FONTS:
+        if candidate.split(",")[0].strip().lower() == family.lower():
+            return candidate
+    return FONTS[0]
+
+
+# ============================================
+# ПОЛЬЗОВАТЕЛИ / СЕССИИ
+# ============================================
+def get_user(username: str) -> Optional[dict]:
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT id, username, display_name, avatar_color, font_family, last_seen "
+        "FROM users WHERE username = ?",
+        (username,),
+    ).fetchone()
     conn.close()
     if not row:
         return None
     return {
-        "id": row[0],
-        "username": row[1],
-        "display_name": row[2],
-        "avatar_color": row[3],
-        "font_family": row[4],
+        "id": row["id"],
+        "username": row["username"],
+        "display_name": row["display_name"] or row["username"],
+        "avatar_color": row["avatar_color"] or "#e53935",
+        "font_family": normalize_font(row["font_family"] or FONTS[0]),
+        "last_seen": row["last_seen"] or 0,
     }
 
 
-# ============================================
-# FASTAPI
-# ============================================
-app = FastAPI(title="SwapTime API")
+def user_exists(username: str) -> bool:
+    conn = db_connect()
+    row = conn.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone()
+    conn.close()
+    return bool(row)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+def create_session(username: str) -> str:
+    token = secrets.token_urlsafe(32)
+    conn = db_connect()
+    conn.execute(
+        "INSERT INTO sessions (token, username, created_at) VALUES (?, ?, ?)",
+        (token, username, int(time.time())),
+    )
+    conn.commit()
+    conn.close()
+    return token
+
+
+def session_username(token: str) -> Optional[str]:
+    if not token:
+        return None
+    conn = db_connect()
+    row = conn.execute("SELECT username FROM sessions WHERE token = ?", (token,)).fetchone()
+    conn.close()
+    return row["username"] if row else None
+
+
+def auth_user(
+    authorization: Optional[str] = Header(default=None),
+    token: Optional[str] = Query(default=None),
+) -> str:
+    """FastAPI-зависимость: достаёт пользователя по Bearer-токену."""
+    raw = token
+    if authorization and authorization.lower().startswith("bearer "):
+        raw = authorization[7:].strip()
+    username = session_username(raw) if raw else None
+    if not username:
+        raise HTTPException(401, "Сессия истекла — войди заново")
+    return username
 
 
 # ============================================
@@ -162,552 +295,968 @@ class LoginData(BaseModel):
 
 
 class FriendRequest(BaseModel):
-    from_user: str
     to_user: str
+    from_user: Optional[str] = None  # игнорируется, оставлен для совместимости
 
 
 class UpdateProfile(BaseModel):
-    username: str
-    display_name: str
-    avatar_color: str
-    font_family: str
+    display_name: str = ""
+    avatar_color: str = "#e53935"
+    font_family: str = FONTS[0]
 
 
 class MessageAction(BaseModel):
     message_id: int
-    username: str
     new_text: str = ""
 
 
+class MarkRead(BaseModel):
+    to_user: str
+    from_user: Optional[str] = None  # игнорируется
+
+
 # ============================================
-# API — РЕГИСТРАЦИЯ
+# ДРУЗЬЯ / СВЯЗИ
+# ============================================
+def are_friends(a: str, b: str) -> bool:
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT 1 FROM friends WHERE status = 'accepted' AND "
+        "((user1 = ? AND user2 = ?) OR (user1 = ? AND user2 = ?))",
+        (a, b, b, a),
+    ).fetchone()
+    conn.close()
+    return bool(row)
+
+
+def friend_usernames(username: str) -> list:
+    conn = db_connect()
+    rows = conn.execute(
+        "SELECT user1, user2 FROM friends WHERE status = 'accepted' AND (user1 = ? OR user2 = ?)",
+        (username, username),
+    ).fetchall()
+    conn.close()
+    return [r["user2"] if r["user1"] == username else r["user1"] for r in rows]
+
+
+def is_blocked(a: str, b: str) -> bool:
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT 1 FROM blocks WHERE (blocker = ? AND blocked = ?) OR (blocker = ? AND blocked = ?)",
+        (a, b, b, a),
+    ).fetchone()
+    conn.close()
+    return bool(row)
+
+
+def blocked_by(owner: str, other: str) -> bool:
+    """Заблокировал ли `other` пользователя `owner`."""
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT 1 FROM blocks WHERE blocker = ? AND blocked = ?", (other, owner)
+    ).fetchone()
+    conn.close()
+    return bool(row)
+
+
+def is_ignored(owner: str, other: str) -> bool:
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT 1 FROM ignores WHERE ignorer = ? AND ignored = ?", (owner, other)
+    ).fetchone()
+    conn.close()
+    return bool(row)
+
+
+def block_list(username: str) -> list:
+    conn = db_connect()
+    rows = conn.execute(
+        "SELECT blocked FROM blocks WHERE blocker = ? ORDER BY created_at DESC", (username,)
+    ).fetchall()
+    conn.close()
+    return [r["blocked"] for r in rows]
+
+
+def ignore_list(username: str) -> list:
+    conn = db_connect()
+    rows = conn.execute(
+        "SELECT ignored FROM ignores WHERE ignorer = ? ORDER BY created_at DESC", (username,)
+    ).fetchall()
+    conn.close()
+    return [r["ignored"] for r in rows]
+
+
+def unread_map(username: str) -> Dict[str, int]:
+    conn = db_connect()
+    rows = conn.execute(
+        """
+        SELECT m.from_user AS u, COUNT(*) AS cnt
+        FROM messages m
+        LEFT JOIN read_status r ON r.username = ? AND r.chat_with = m.from_user
+        WHERE m.to_user = ? AND m.deleted = 0 AND m.id > COALESCE(r.last_read_id, 0)
+        GROUP BY m.from_user
+        """,
+        (username, username),
+    ).fetchall()
+    conn.close()
+    return {r["u"]: r["cnt"] for r in rows}
+
+
+def mark_read(username: str, chat_with: str) -> int:
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT MAX(id) AS m FROM messages WHERE from_user = ? AND to_user = ?",
+        (chat_with, username),
+    ).fetchone()
+    last_id = row["m"] or 0
+    conn.execute(
+        """
+        INSERT INTO read_status (username, chat_with, last_read_id)
+        VALUES (?, ?, ?)
+        ON CONFLICT(username, chat_with) DO UPDATE SET last_read_id =
+            MAX(read_status.last_read_id, excluded.last_read_id)
+        """,
+        (username, chat_with, last_id),
+    )
+    conn.commit()
+    conn.close()
+    return last_id
+
+
+# ============================================
+# СЕРИАЛИЗАЦИЯ СООБЩЕНИЙ
+# ============================================
+MSG_COLUMNS = (
+    "id, from_user, to_user, text, reply_to, edited, deleted, client_id, created_at"
+)
+
+
+def _replies_map(conn: sqlite3.Connection, ids) -> Dict[int, dict]:
+    ids = [int(i) for i in ids if i]
+    if not ids:
+        return {}
+    placeholders = ",".join("?" * len(ids))
+    rows = conn.execute(
+        f"SELECT id, from_user, text, deleted FROM messages WHERE id IN ({placeholders})",
+        ids,
+    ).fetchall()
+    return {
+        r["id"]: {
+            "id": r["id"],
+            "from": r["from_user"],
+            "text": "" if r["deleted"] else (r["text"] or ""),
+            "deleted": r["deleted"],
+        }
+        for r in rows
+    }
+
+
+def message_dict(row: sqlite3.Row, replies: Dict[int, dict]) -> dict:
+    reply_to = row["reply_to"] or 0
+    return {
+        "id": row["id"],
+        "client_id": row["client_id"],
+        "from": row["from_user"],
+        "to": row["to_user"],
+        "text": "" if row["deleted"] else (row["text"] or ""),
+        "reply_to": reply_to,
+        "reply_preview": replies.get(reply_to) if reply_to else None,
+        "edited": row["edited"],
+        "deleted": row["deleted"],
+        "created_at": row["created_at"],
+    }
+
+
+def fetch_message(conn: sqlite3.Connection, message_id: int) -> Optional[dict]:
+    row = conn.execute(
+        f"SELECT {MSG_COLUMNS} FROM messages WHERE id = ?", (message_id,)
+    ).fetchone()
+    if not row:
+        return None
+    return message_dict(row, _replies_map(conn, [row["reply_to"]]))
+
+
+def messages_between(conn: sqlite3.Connection, me: str, other: str, limit: int) -> list:
+    rows = conn.execute(
+        f"""
+        SELECT {MSG_COLUMNS} FROM messages
+        WHERE (from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?)
+        ORDER BY id DESC LIMIT ?
+        """,
+        (me, other, other, me, limit),
+    ).fetchall()
+    rows = list(reversed(rows))
+    replies = _replies_map(conn, [r["reply_to"] for r in rows])
+    return [message_dict(r, replies) for r in rows]
+
+
+# ============================================
+# FASTAPI
+# ============================================
+app = FastAPI(title="SwapTime API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+active_connections: Dict[str, Set[WebSocket]] = {}
+
+
+# ============================================
+# API — РЕГИСТРАЦИЯ / ВХОД
 # ============================================
 @app.post("/api/register")
 async def register(data: RegisterData):
     username = data.username.strip().lower()
-    email = data.email.strip().lower()
-    if len(username) < 3:
-        raise HTTPException(400, "Ник — минимум 3 символа")
+    email = (data.email or "").strip().lower()
+    display_name = (data.display_name or "").strip()[:40]
+
+    if not USERNAME_RE.match(username):
+        raise HTTPException(400, "Ник: 3–20 символов, латиница/цифры/_")
     if len(data.password) < 4:
         raise HTTPException(400, "Пароль — минимум 4 символа")
-    if email and ("@" not in email or "." not in email):
+    if len(data.password) > 128:
+        raise HTTPException(400, "Пароль слишком длинный")
+    if email and ("@" not in email or "." not in email.split("@")[-1]):
         raise HTTPException(400, "Неверный email")
 
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
-    c.execute("SELECT id FROM users WHERE username = ?", (username,))
-    if c.fetchone():
+    conn = db_connect()
+    if conn.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
         conn.close()
         raise HTTPException(400, "Ник занят")
+    if email and conn.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone():
+        conn.close()
+        raise HTTPException(400, "Email занят")
 
-    if email:
-        c.execute("SELECT id FROM users WHERE email = ?", (email,))
-        if c.fetchone():
-            conn.close()
-            raise HTTPException(400, "Email занят")
-
-    c.execute(
-        "INSERT INTO users (username, email, password_hash, display_name, created_at) VALUES (?, ?, ?, ?, ?)",
-        (username, email, hash_password(data.password), data.display_name or username, int(datetime.now().timestamp()))
+    conn.execute(
+        "INSERT INTO users (username, email, password_hash, display_name, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (username, email, hash_password(data.password), display_name or username, int(time.time())),
     )
     conn.commit()
     conn.close()
 
-    token = secrets.token_urlsafe(32)
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("INSERT INTO sessions (token, username, created_at) VALUES (?, ?, ?)",
-              (token, username, int(datetime.now().timestamp())))
-    conn.commit()
-    conn.close()
-
+    token = create_session(username)
     return {"ok": True, "token": token, "user": get_user(username)}
 
 
-# ============================================
-# API — ЛОГИН
-# ============================================
 @app.post("/api/login")
 async def login(data: LoginData):
     username = data.username.strip().lower()
 
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT password_hash FROM users WHERE username = ?", (username,))
-    row = c.fetchone()
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT password_hash FROM users WHERE username = ?", (username,)
+    ).fetchone()
+    if not row or not verify_password(data.password, row["password_hash"]):
+        conn.close()
+        # одинаковый текст, чтобы не палить существование ника
+        raise HTTPException(400, "Неверный ник или пароль")
+
+    if is_legacy_hash(row["password_hash"]):
+        conn.execute(
+            "UPDATE users SET password_hash = ? WHERE username = ?",
+            (hash_password(data.password), username),
+        )
+        conn.commit()
     conn.close()
 
-    if not row:
-        raise HTTPException(400, "Юзер не найден")
-    if row[0] != hash_password(data.password):
-        raise HTTPException(400, "Неверный пароль")
-
-    token = secrets.token_urlsafe(32)
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("INSERT INTO sessions (token, username, created_at) VALUES (?, ?, ?)",
-              (token, username, int(datetime.now().timestamp())))
-    conn.commit()
-    conn.close()
-
+    token = create_session(username)
     return {"ok": True, "token": token, "user": get_user(username)}
 
 
-# ============================================
-# API — ОБНОВЛЕНИЕ ПРОФИЛЯ
-# ============================================
+@app.post("/api/logout")
+async def logout(authorization: Optional[str] = Header(default=None)):
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+        conn = db_connect()
+        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+        conn.commit()
+        conn.close()
+    return {"ok": True}
+
+
+@app.get("/api/me")
+async def me(user: str = Depends(auth_user)):
+    data = get_user(user)
+    if not data:
+        raise HTTPException(401, "Юзер не найден")
+    data["online"] = True
+    return {"user": data, "fonts": FONTS}
+
+
 @app.post("/api/update_profile")
-async def update_profile(data: UpdateProfile):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
+async def update_profile(data: UpdateProfile, user: str = Depends(auth_user)):
+    display_name = (data.display_name or "").strip()[:40] or user
+    color = data.avatar_color if COLOR_RE.match(data.avatar_color or "") else "#e53935"
+    font = normalize_font(data.font_family) if FONT_RE.match(data.font_family or "") else FONTS[0]
+
+    conn = db_connect()
+    conn.execute(
         "UPDATE users SET display_name = ?, avatar_color = ?, font_family = ? WHERE username = ?",
-        (data.display_name, data.avatar_color, data.font_family, data.username)
+        (display_name, color, font, user),
     )
     conn.commit()
     conn.close()
-    return {"ok": True, "user": get_user(data.username)}
+
+    updated = get_user(user)
+    await broadcast_to_friends(user, {"type": "profile_updated", "user": {
+        "username": user,
+        "display_name": updated["display_name"],
+        "avatar_color": updated["avatar_color"],
+    }})
+    return {"ok": True, "user": updated}
 
 
 # ============================================
-# API — НАСТРОЙКИ (БЛОКИРОВКИ / ИГНОР)
+# API — НАСТРОЙКИ
 # ============================================
-@app.get("/api/settings/{username}")
-async def get_settings(username: str):
-    username = username.strip().lower()
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
-    c.execute("SELECT blocked FROM blocks WHERE blocker = ?", (username,))
-    blocked = [r[0] for r in c.fetchall()]
-
-    c.execute("SELECT ignored FROM ignores WHERE ignorer = ?", (username,))
-    ignored = [r[0] for r in c.fetchall()]
-
-    conn.close()
-    return {"blocked": blocked, "ignored": ignored}
+@app.get("/api/settings")
+async def get_settings(user: str = Depends(auth_user)):
+    return {
+        "blocked": block_list(user),
+        "ignored": ignore_list(user),
+        "fonts": FONTS,
+    }
 
 
 # ============================================
-# API — ИСТОРИЯ
+# API — ИСТОРИЯ / НЕПРОЧИТАННЫЕ
 # ============================================
+def _can_chat(me: str, other: str) -> bool:
+    if me == other or not user_exists(other):
+        return False
+    return are_friends(me, other)
+
+
 @app.get("/api/messages/{user1}/{user2}")
-async def get_messages(user1: str, user2: str):
+async def get_messages(
+    user1: str,
+    user2: str,
+    limit: int = Query(default=HISTORY_LIMIT, ge=1, le=500),
+    me: str = Depends(auth_user),
+):
     user1 = user1.strip().lower()
     user2 = user2.strip().lower()
+    if me not in (user1, user2):
+        raise HTTPException(403, "Это чужой чат")
+    other = user2 if me == user1 else user1
 
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
-        """SELECT id, from_user, to_user, text, reply_to, edited, deleted, created_at
-           FROM messages
-           WHERE (from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?)
-           ORDER BY created_at ASC
-           LIMIT 100""",
-        (user1, user2, user2, user1)
-    )
-    rows = c.fetchall()
+    conn = db_connect()
+    data = messages_between(conn, me, other, limit)
     conn.close()
-
-    return [
-        {
-            "id": r[0],
-            "from": r[1],
-            "to": r[2],
-            "text": r[3],
-            "reply_to": r[4],
-            "edited": r[5],
-            "deleted": r[6],
-            "time": datetime.fromtimestamp(r[7]).strftime("%H:%M")
-        }
-        for r in rows
-    ]
+    return data
 
 
-@app.post("/api/messages/delete")
-async def delete_message(data: MessageAction):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("UPDATE messages SET deleted = 1, text = 'Сообщение удалено' WHERE id = ? AND from_user = ?", (data.message_id, data.username))
-    conn.commit()
-    conn.close()
-    return {"ok": True}
-
-
-@app.post("/api/messages/edit")
-async def edit_message(data: MessageAction):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("UPDATE messages SET text = ?, edited = 1 WHERE id = ? AND from_user = ?", (data.new_text, data.message_id, data.username))
-    conn.commit()
-    conn.close()
-    return {"ok": True}
-
-
-# ============================================
-# API — НЕПРОЧИТАННЫЕ
-# ============================================
-@app.get("/api/unread/{username}")
-async def get_unread(username: str):
-    username = username.strip().lower()
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
-    c.execute("SELECT chat_with, last_read_id FROM read_status WHERE username = ?", (username,))
-    read_map = dict(c.fetchall())
-
-    c.execute("SELECT from_user, COUNT(*) FROM messages WHERE to_user = ? AND deleted = 0 GROUP BY from_user", (username,))
-    rows = c.fetchall()
-
-    unread = {}
-    for from_user, total in rows:
-        last_read = read_map.get(from_user, 0)
-        c.execute("SELECT COUNT(*) FROM messages WHERE from_user = ? AND to_user = ? AND id > ? AND deleted = 0",
-                  (from_user, username, last_read))
-        count = c.fetchone()[0]
-        if count > 0:
-            unread[from_user] = count
-
-    conn.close()
-    return {"unread": unread}
+@app.get("/api/unread")
+async def get_unread(user: str = Depends(auth_user)):
+    return {"unread": unread_map(user)}
 
 
 @app.post("/api/mark_read")
-async def mark_read(payload: FriendRequest):
-    username = payload.from_user.strip().lower()
-    chat_with = payload.to_user.strip().lower()
+async def mark_read_endpoint(data: MarkRead, user: str = Depends(auth_user)):
+    other = data.to_user.strip().lower()
+    last_id = mark_read(user, other)
+    # синхронизируем бейджи в других вкладках этого же пользователя
+    await send_to_user(user, {"type": "read_sync", "chat_with": other, "last_read_id": last_id})
+    return {"ok": True, "last_read_id": last_id}
 
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
 
-    c.execute("SELECT MAX(id) FROM messages WHERE from_user = ? AND to_user = ?", (chat_with, username))
-    last_id = c.fetchone()[0] or 0
+@app.get("/api/chats")
+async def get_chats(user: str = Depends(auth_user)):
+    """Список друзей + последнее сообщение + непрочитанные + онлайн."""
+    unread = unread_map(user)
+    friends = []
 
-    c.execute(
-        """INSERT INTO read_status (username, chat_with, last_read_id)
-           VALUES (?, ?, ?)
-           ON CONFLICT(username, chat_with) DO UPDATE SET last_read_id = ?""",
-        (username, chat_with, last_id, last_id)
-    )
-
-    conn.commit()
+    conn = db_connect()
+    for name in friend_usernames(user):
+        info = get_user(name)
+        if not info:
+            continue
+        last = conn.execute(
+            f"""
+            SELECT {MSG_COLUMNS} FROM messages
+            WHERE (from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?)
+            ORDER BY id DESC LIMIT 1
+            """,
+            (user, name, name, user),
+        ).fetchone()
+        last_msg = None
+        if last:
+            last_msg = message_dict(last, _replies_map(conn, [last["reply_to"]]))
+        friends.append({
+            "username": name,
+            "display_name": info["display_name"],
+            "avatar_color": info["avatar_color"],
+            "online": name in active_connections,
+            "unread": unread.get(name, 0),
+            "last_message": last_msg,
+        })
     conn.close()
-    return {"ok": True}
+
+    def sort_key(item):
+        lm = item["last_message"]
+        return lm["created_at"] if lm else 0
+
+    friends.sort(key=sort_key, reverse=True)
+    return {"chats": friends, "unread": unread}
+
+
+# ============================================
+# API — РЕДАКТИРОВАНИЕ / УДАЛЕНИЕ (REST fallback)
+# ============================================
+@app.post("/api/messages/edit")
+async def edit_message(data: MessageAction, user: str = Depends(auth_user)):
+    text = (data.new_text or "").strip()
+    if not text:
+        raise HTTPException(400, "Пустое сообщение")
+
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT from_user, deleted FROM messages WHERE id = ?", (data.message_id,)
+    ).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Сообщение не найдено")
+    if row["from_user"] != user:
+        conn.close()
+        raise HTTPException(403, "Это не твоё сообщение")
+    if row["deleted"]:
+        conn.close()
+        raise HTTPException(400, "Сообщение удалено")
+
+    conn.execute(
+        "UPDATE messages SET text = ?, edited = 1 WHERE id = ?", (text[:MAX_MESSAGE_LEN], data.message_id)
+    )
+    conn.commit()
+    msg = fetch_message(conn, data.message_id)
+    conn.close()
+
+    await _broadcast_message_update(msg)
+    return {"ok": True, "message": msg}
+
+
+@app.post("/api/messages/delete")
+async def delete_message(data: MessageAction, user: str = Depends(auth_user)):
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT from_user FROM messages WHERE id = ?", (data.message_id,)
+    ).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Сообщение не найдено")
+    if row["from_user"] != user:
+        conn.close()
+        raise HTTPException(403, "Это не твоё сообщение")
+
+    conn.execute("UPDATE messages SET deleted = 1, text = '' WHERE id = ?", (data.message_id,))
+    conn.commit()
+    msg = fetch_message(conn, data.message_id)
+    conn.close()
+
+    await _broadcast_message_update(msg)
+    return {"ok": True, "message": msg}
 
 
 # ============================================
 # API — ДРУЗЬЯ
 # ============================================
+def _friends_payload(user: str) -> dict:
+    conn = db_connect()
+    rows = conn.execute(
+        "SELECT user1, user2 FROM friends WHERE status = 'accepted' AND (user1 = ? OR user2 = ?)",
+        (user, user),
+    ).fetchall()
+    friends = []
+    for r in rows:
+        other = r["user2"] if r["user1"] == user else r["user1"]
+        info = get_user(other)
+        if info:
+            friends.append({
+                "username": other,
+                "display_name": info["display_name"],
+                "avatar_color": info["avatar_color"],
+                "online": other in active_connections,
+            })
+
+    req_rows = conn.execute(
+        "SELECT user1 FROM friends WHERE user2 = ? AND status = 'pending'", (user,)
+    ).fetchall()
+    incoming = []
+    for r in req_rows:
+        info = get_user(r["user1"])
+        if info:
+            incoming.append({
+                "username": info["username"],
+                "display_name": info["display_name"],
+                "avatar_color": info["avatar_color"],
+            })
+
+    out_rows = conn.execute(
+        "SELECT user2 FROM friends WHERE user1 = ? AND status = 'pending'", (user,)
+    ).fetchall()
+    outgoing = [r["user2"] for r in out_rows]
+    conn.close()
+
+    return {
+        "friends": friends,
+        "requests": incoming,
+        "outgoing": outgoing,
+        "blocked": block_list(user),
+        "ignored": ignore_list(user),
+    }
+
+
+@app.get("/api/friends")
+async def get_friends(user: str = Depends(auth_user)):
+    return _friends_payload(user)
+
+
+@app.get("/api/friends/{username}")
+async def get_friends_legacy(username: str, user: str = Depends(auth_user)):
+    """Старый адрес — оставлен для совместимости."""
+    if username.strip().lower() != user:
+        raise HTTPException(403, "Это чужой список")
+    return _friends_payload(user)
+
+
 @app.post("/api/friends/request")
-async def send_friend_request(data: FriendRequest):
-    user1 = data.from_user.strip().lower()
-    user2 = data.to_user.strip().lower()
+async def send_friend_request(data: FriendRequest, user: str = Depends(auth_user)):
+    target = data.to_user.strip().lower()
 
-    if user1 == user2:
+    if target == user:
         raise HTTPException(400, "Нельзя добавить себя")
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
-    c.execute("SELECT id FROM users WHERE username = ?", (user2,))
-    if not c.fetchone():
-        conn.close()
+    if not user_exists(target):
         raise HTTPException(400, "Юзер не найден")
+    if is_blocked(user, target):
+        raise HTTPException(400, "Пользователь недоступен")
 
-    c.execute(
-        "SELECT id, status FROM friends WHERE (user1 = ? AND user2 = ?) OR (user1 = ? AND user2 = ?)",
-        (user1, user2, user2, user1)
-    )
-    existing = c.fetchone()
-    if existing:
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT id, status, from_user FROM friends WHERE (user1 = ? AND user2 = ?) OR (user1 = ? AND user2 = ?)",
+        (user, target, target, user),
+    ).fetchone()
+
+    if row:
+        if row["status"] == "accepted":
+            conn.close()
+            raise HTTPException(400, "Вы уже друзья")
+        if row["from_user"] == user:
+            conn.close()
+            raise HTTPException(400, "Запрос уже отправлен")
+        # встречный запрос — сразу дружим
+        conn.execute("UPDATE friends SET status = 'accepted' WHERE id = ?", (row["id"],))
+        conn.commit()
         conn.close()
-        raise HTTPException(400, "Вы уже друзья" if existing[1] == "accepted" else "Запрос уже отправлен")
+        await _notify_friends_changed(user, target)
+        return {"ok": True, "message": "Вы теперь друзья!", "accepted": True}
 
-    c.execute(
-        "INSERT INTO friends (user1, user2, status, from_user, created_at) VALUES (?, ?, ?, ?, ?)",
-        (user1, user2, "pending", user1, int(datetime.now().timestamp()))
+    conn.execute(
+        "INSERT INTO friends (user1, user2, status, from_user, created_at) VALUES (?, ?, 'pending', ?, ?)",
+        (user, target, user, int(time.time())),
     )
     conn.commit()
     conn.close()
+
+    await send_to_user(target, {"type": "friend_request", "from": user})
     return {"ok": True, "message": "Запрос отправлен"}
 
 
 @app.post("/api/friends/accept")
-async def accept_friend(data: FriendRequest):
-    user1 = data.from_user.strip().lower()
-    user2 = data.to_user.strip().lower()
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
+async def accept_friend(data: FriendRequest, user: str = Depends(auth_user)):
+    # во фронте в поле to_user приходит ник того, КТО отправил заявку
+    requester = data.to_user.strip().lower()
+    conn = db_connect()
+    cur = conn.execute(
         "UPDATE friends SET status = 'accepted' WHERE user1 = ? AND user2 = ? AND status = 'pending'",
-        (user2, user1)
+        (requester, user),
     )
     conn.commit()
+    changed = cur.rowcount
     conn.close()
+    if not changed:
+        raise HTTPException(404, "Запрос не найден")
+    await _notify_friends_changed(user, requester)
     return {"ok": True, "message": "Друг добавлен"}
 
 
 @app.post("/api/friends/decline")
-async def decline_friend(data: FriendRequest):
-    user1 = data.from_user.strip().lower()
-    user2 = data.to_user.strip().lower()
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("DELETE FROM friends WHERE user1 = ? AND user2 = ? AND status = 'pending'", (user2, user1))
-    conn.commit()
-    conn.close()
-    return {"ok": True, "message": "Отклонён"}
-
-
-@app.post("/api/friends/remove")
-async def remove_friend(data: FriendRequest):
-    user1 = data.from_user.strip().lower()
-    user2 = data.to_user.strip().lower()
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
-        "DELETE FROM friends WHERE (user1 = ? AND user2 = ?) OR (user1 = ? AND user2 = ?)",
-        (user1, user2, user2, user1)
+async def decline_friend(data: FriendRequest, user: str = Depends(auth_user)):
+    requester = data.to_user.strip().lower()
+    conn = db_connect()
+    conn.execute(
+        "DELETE FROM friends WHERE user1 = ? AND user2 = ? AND status = 'pending'",
+        (requester, user),
     )
     conn.commit()
     conn.close()
+    await send_to_user(requester, {"type": "friend_changed"})
+    return {"ok": True, "message": "Запрос отклонён"}
+
+
+@app.post("/api/friends/remove")
+async def remove_friend(data: FriendRequest, user: str = Depends(auth_user)):
+    other = data.to_user.strip().lower()
+    conn = db_connect()
+    conn.execute(
+        "DELETE FROM friends WHERE (user1 = ? AND user2 = ?) OR (user1 = ? AND user2 = ?)",
+        (user, other, other, user),
+    )
+    conn.commit()
+    conn.close()
+    await _notify_friends_changed(user, other)
     return {"ok": True, "message": "Удалён из друзей"}
 
 
 @app.post("/api/friends/block")
-async def block_user(data: FriendRequest):
-    blocker = data.from_user.strip().lower()
-    blocked = data.to_user.strip().lower()
+async def block_user(data: FriendRequest, user: str = Depends(auth_user)):
+    other = data.to_user.strip().lower()
+    if other == user:
+        raise HTTPException(400, "Нельзя заблокировать себя")
+    if not user_exists(other):
+        raise HTTPException(404, "Юзер не найден")
 
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
-    c.execute(
+    conn = db_connect()
+    conn.execute(
         "DELETE FROM friends WHERE (user1 = ? AND user2 = ?) OR (user1 = ? AND user2 = ?)",
-        (blocker, blocked, blocked, blocker)
+        (user, other, other, user),
     )
-
     try:
-        c.execute(
+        conn.execute(
             "INSERT INTO blocks (blocker, blocked, created_at) VALUES (?, ?, ?)",
-            (blocker, blocked, int(datetime.now().timestamp()))
+            (user, other, int(time.time())),
         )
     except sqlite3.IntegrityError:
         conn.close()
         raise HTTPException(400, "Уже заблокирован")
-
     conn.commit()
     conn.close()
+
+    await _notify_friends_changed(user, other)
     return {"ok": True, "message": "Заблокирован"}
 
 
 @app.post("/api/friends/unblock")
-async def unblock_user(data: FriendRequest):
-    blocker = data.from_user.strip().lower()
-    blocked = data.to_user.strip().lower()
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("DELETE FROM blocks WHERE blocker = ? AND blocked = ?", (blocker, blocked))
+async def unblock_user(data: FriendRequest, user: str = Depends(auth_user)):
+    other = data.to_user.strip().lower()
+    conn = db_connect()
+    conn.execute("DELETE FROM blocks WHERE blocker = ? AND blocked = ?", (user, other))
     conn.commit()
     conn.close()
     return {"ok": True, "message": "Разблокирован"}
 
 
 @app.post("/api/friends/ignore")
-async def ignore_user(data: FriendRequest):
-    ignorer = data.from_user.strip().lower()
-    ignored = data.to_user.strip().lower()
+async def ignore_user(data: FriendRequest, user: str = Depends(auth_user)):
+    other = data.to_user.strip().lower()
+    if other == user:
+        raise HTTPException(400, "Нельзя игнорировать себя")
+    if not user_exists(other):
+        raise HTTPException(404, "Юзер не найден")
 
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-
+    conn = db_connect()
     try:
-        c.execute(
+        conn.execute(
             "INSERT INTO ignores (ignorer, ignored, created_at) VALUES (?, ?, ?)",
-            (ignorer, ignored, int(datetime.now().timestamp()))
+            (user, other, int(time.time())),
         )
     except sqlite3.IntegrityError:
         conn.close()
         raise HTTPException(400, "Уже игнорируется")
-
     conn.commit()
     conn.close()
     return {"ok": True, "message": "Игнорируется"}
 
 
 @app.post("/api/friends/unignore")
-async def unignore_user(data: FriendRequest):
-    ignorer = data.from_user.strip().lower()
-    ignored = data.to_user.strip().lower()
-
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("DELETE FROM ignores WHERE ignorer = ? AND ignored = ?", (ignorer, ignored))
+async def unignore_user(data: FriendRequest, user: str = Depends(auth_user)):
+    other = data.to_user.strip().lower()
+    conn = db_connect()
+    conn.execute("DELETE FROM ignores WHERE ignorer = ? AND ignored = ?", (user, other))
     conn.commit()
     conn.close()
     return {"ok": True, "message": "Убран из игнора"}
 
 
-@app.get("/api/friends/{username}")
-async def get_friends(username: str):
-    username = username.strip().lower()
+# ============================================
+# WEBSOCKET — ОТПРАВКА
+# ============================================
+async def send_to_user(username: str, payload: dict) -> None:
+    text = json.dumps(payload, ensure_ascii=False)
+    dead = []
+    for ws in list(active_connections.get(username, ())):
+        try:
+            await ws.send_text(text)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        active_connections.get(username, set()).discard(ws)
 
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
 
-    c.execute(
-        "SELECT user1, user2 FROM friends WHERE (user1 = ? OR user2 = ?) AND status = 'accepted'",
-        (username, username)
+async def broadcast_to_friends(username: str, payload: dict) -> None:
+    for friend in friend_usernames(username):
+        await send_to_user(friend, payload)
+
+
+async def _broadcast_message_update(msg: Optional[dict]) -> None:
+    if not msg:
+        return
+    payload = {"type": "message_updated", **msg}
+    await send_to_user(msg["from"], payload)
+    await send_to_user(msg["to"], payload)
+
+
+async def _notify_friends_changed(a: str, b: str) -> None:
+    await send_to_user(a, {"type": "friend_changed"})
+    await send_to_user(b, {"type": "friend_changed"})
+
+
+async def _broadcast_presence(username: str, online: bool) -> None:
+    await broadcast_to_friends(
+        username, {"type": "presence", "user": username, "online": online}
     )
-    rows = c.fetchall()
-    friends = []
-    for u1, u2 in rows:
-        friend = u2 if u1 == username else u1
-        c.execute("SELECT username, display_name, avatar_color FROM users WHERE username = ?", (friend,))
-        row = c.fetchone()
-        if row:
-            friends.append({"username": row[0], "display_name": row[1], "avatar_color": row[2]})
 
-    c.execute("SELECT from_user FROM friends WHERE user2 = ? AND status = 'pending'", (username,))
-    requests = [r[0] for r in c.fetchall()]
 
+# ============================================
+# WEBSOCKET — ОБРАБОТКА
+# ============================================
+def _save_message(sender: str, to_user: str, text: str, client_id: Optional[str], reply_to: int):
+    conn = db_connect()
+    # ответ на сообщение должен существовать и относиться к этому же диалогу
+    if reply_to:
+        row = conn.execute(
+            "SELECT 1 FROM messages WHERE id = ? AND "
+            "((from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?))",
+            (reply_to, sender, to_user, to_user, sender),
+        ).fetchone()
+        if not row:
+            reply_to = 0
+
+    # защита от повторной отправки того же client_id (двойной клик, ретрай)
+    if client_id:
+        dup = conn.execute(
+            "SELECT id FROM messages WHERE client_id = ? AND from_user = ?",
+            (client_id, sender),
+        ).fetchone()
+        if dup:
+            msg = fetch_message(conn, dup["id"])
+            conn.close()
+            return msg, False
+
+    cur = conn.execute(
+        "INSERT INTO messages (from_user, to_user, text, reply_to, client_id, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (sender, to_user, text, reply_to, client_id, int(time.time())),
+    )
+    msg_id = cur.lastrowid
+    conn.commit()
+    msg = fetch_message(conn, msg_id)
     conn.close()
-    return {"friends": friends, "requests": requests}
+    return msg, True
 
 
-# ============================================
-# WEBSOCKET
-# ============================================
-active_connections: Dict[str, Set[WebSocket]] = {}
+@app.websocket("/ws")
+async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(default=None)):
+    username = session_username(token or "")
+    if not username:
+        await websocket.close(code=4401)
+        return
 
-
-@app.websocket("/ws/{username}")
-async def websocket_chat(websocket: WebSocket, username: str):
     await websocket.accept()
+    active_connections.setdefault(username, set()).add(websocket)
+    print(f"🟢 {username} подключён (онлайн: {len(active_connections)})")
 
-    if username not in active_connections:
-        active_connections[username] = set()
-    active_connections[username].add(websocket)
-
-    print(f"🟢 {username} подключён (всего: {len(active_connections)})")
+    await send_to_user(username, {"type": "presence", "user": username, "online": True})
+    await _broadcast_presence(username, True)
 
     try:
         while True:
-            data = await websocket.receive_text()
+            raw = await websocket.receive_text()
             try:
-                msg = json.loads(data)
-            except:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(msg, dict):
                 continue
 
             msg_type = msg.get("type")
 
+            # ---------- НОВОЕ СООБЩЕНИЕ ----------
             if msg_type == "message":
-                to_user = msg.get("to", "").strip().lower()
-                text = msg.get("text", "").strip()
-                reply_to = msg.get("reply_to", 0)
+                to_user = str(msg.get("to", "")).strip().lower()
+                text = str(msg.get("text", "")).strip()
+                client_id = msg.get("client_id")
+                reply_to = msg.get("reply_to") or 0
+                try:
+                    reply_to = int(reply_to)
+                except (TypeError, ValueError):
+                    reply_to = 0
 
                 if not to_user or not text:
                     continue
+                if len(text) > MAX_MESSAGE_LEN:
+                    await websocket.send_text(json.dumps({
+                        "type": "error", "client_id": client_id,
+                        "text": f"Сообщение слишком длинное (макс. {MAX_MESSAGE_LEN})",
+                    }, ensure_ascii=False))
+                    continue
+                if not user_exists(to_user):
+                    await websocket.send_text(json.dumps({
+                        "type": "error", "client_id": client_id, "text": "Юзер не найден",
+                    }, ensure_ascii=False))
+                    continue
+                if is_blocked(username, to_user):
+                    await websocket.send_text(json.dumps({
+                        "type": "error", "client_id": client_id,
+                        "text": "Нельзя написать: пользователь в блоке",
+                    }, ensure_ascii=False))
+                    continue
+                if not are_friends(username, to_user):
+                    await websocket.send_text(json.dumps({
+                        "type": "error", "client_id": client_id,
+                        "text": "Сначала добавь пользователя в друзья",
+                    }, ensure_ascii=False))
+                    continue
 
-                conn = sqlite3.connect(DB_PATH)
-                c = conn.cursor()
+                saved, is_new = _save_message(username, to_user, text, client_id, reply_to)
+                if not saved:
+                    continue
 
-                # Проверяем блокировку
-                c.execute(
-                    "SELECT id FROM blocks WHERE (blocker = ? AND blocked = ?) OR (blocker = ? AND blocked = ?)",
-                    (to_user, username, username, to_user)
-                )
-                if c.fetchone():
+                payload = {"type": "message", **saved}
+
+                # получателю — только если сообщение новое и он не игнорирует отправителя
+                if is_new and not is_ignored(to_user, username):
+                    await send_to_user(to_user, payload)
+
+                # отправителю — во все его вкладки (включая эту), чтобы
+                # заменить оптимистичное сообщение настоящим id
+                await send_to_user(username, payload)
+
+            # ---------- РЕДАКТИРОВАНИЕ ----------
+            elif msg_type == "edit_msg":
+                try:
+                    mid = int(msg.get("id"))
+                except (TypeError, ValueError):
+                    continue
+                new_text = str(msg.get("text", "")).strip()
+                if not new_text or len(new_text) > MAX_MESSAGE_LEN:
+                    await websocket.send_text(json.dumps({
+                        "type": "error", "text": "Текст пустой или слишком длинный",
+                    }, ensure_ascii=False))
+                    continue
+
+                conn = db_connect()
+                row = conn.execute(
+                    "SELECT from_user, to_user, deleted FROM messages WHERE id = ?", (mid,)
+                ).fetchone()
+                if not row:
+                    conn.close()
+                    await websocket.send_text(json.dumps({
+                        "type": "error", "text": "Сообщение не найдено",
+                    }, ensure_ascii=False))
+                    continue
+                if row["from_user"] != username:
+                    conn.close()
+                    await websocket.send_text(json.dumps({
+                        "type": "error", "text": "Можно редактировать только свои сообщения",
+                    }, ensure_ascii=False))
+                    continue
+                if row["deleted"]:
                     conn.close()
                     continue
 
-                # Проверяем игнор
-                c.execute("SELECT id FROM ignores WHERE ignorer = ? AND ignored = ?", (to_user, username))
-                ignored = c.fetchone() is not None
-
-                c.execute(
-                    "INSERT INTO messages (from_user, to_user, text, reply_to, created_at) VALUES (?, ?, ?, ?, ?)",
-                    (username, to_user, text, reply_to, int(datetime.now().timestamp()))
+                conn.execute(
+                    "UPDATE messages SET text = ?, edited = 1 WHERE id = ?", (new_text, mid)
                 )
-                msg_id = c.lastrowid
                 conn.commit()
+                updated = fetch_message(conn, mid)
                 conn.close()
+                await _broadcast_message_update(updated)
 
-                payload = json.dumps({
-                    "type": "message",
-                    "id": msg_id,
-                    "from": username,
-                    "to": to_user,
-                    "text": text,
-                    "reply_to": reply_to,
-                    "time": datetime.now().strftime("%H:%M"),
+            # ---------- УДАЛЕНИЕ ----------
+            elif msg_type == "delete_msg":
+                try:
+                    mid = int(msg.get("id"))
+                except (TypeError, ValueError):
+                    continue
+
+                conn = db_connect()
+                row = conn.execute(
+                    "SELECT from_user FROM messages WHERE id = ?", (mid,)
+                ).fetchone()
+                if not row:
+                    conn.close()
+                    continue
+                if row["from_user"] != username:
+                    conn.close()
+                    await websocket.send_text(json.dumps({
+                        "type": "error", "text": "Можно удалять только свои сообщения",
+                    }, ensure_ascii=False))
+                    continue
+
+                conn.execute("UPDATE messages SET deleted = 1, text = '' WHERE id = ?", (mid,))
+                conn.commit()
+                updated = fetch_message(conn, mid)
+                conn.close()
+                await _broadcast_message_update(updated)
+
+            # ---------- ПРОЧИТАНО ----------
+            elif msg_type == "read":
+                chat_with = str(msg.get("chat_with", "")).strip().lower()
+                if not chat_with:
+                    continue
+                last_id = mark_read(username, chat_with)
+                await send_to_user(username, {
+                    "type": "read_sync", "chat_with": chat_with, "last_read_id": last_id,
+                })
+                await send_to_user(chat_with, {
+                    "type": "read", "by": username, "last_read_id": last_id,
                 })
 
-                if not ignored and to_user in active_connections:
-                    for ws in active_connections[to_user]:
-                        try:
-                            await ws.send_text(payload)
-                        except:
-                            pass
+            # ---------- ПЕЧАТАЕТ ----------
+            elif msg_type == "typing":
+                to_user = str(msg.get("to", "")).strip().lower()
+                if not to_user:
+                    continue
+                if is_blocked(username, to_user) or is_ignored(to_user, username):
+                    continue
+                if not are_friends(username, to_user):
+                    continue
+                await send_to_user(to_user, {"type": "typing", "from": username})
 
-                for ws in active_connections.get(username, []):
-                    try:
-                        await ws.send_text(payload)
-                    except:
-                        pass
-
-            elif msg_type == "delete_msg":
-                mid = msg.get("id")
-                conn = sqlite3.connect(DB_PATH)
-                c = conn.cursor()
-                c.execute("UPDATE messages SET deleted = 1, text = 'Сообщение удалено' WHERE id = ? AND from_user = ?", (mid, username))
-                conn.commit()
-                conn.close()
-
-                payload = json.dumps({"type": "update_msg", "id": mid, "text": "Сообщение удалено", "deleted": 1})
-                for ws in active_connections.get(username, []):
-                    try:
-                        await ws.send_text(payload)
-                    except:
-                        pass
-
-            elif msg_type == "edit_msg":
-                mid = msg.get("id")
-                new_text = msg.get("text")
-                conn = sqlite3.connect(DB_PATH)
-                c = conn.cursor()
-                c.execute("UPDATE messages SET text = ?, edited = 1 WHERE id = ? AND from_user = ?", (new_text, mid, username))
-                conn.commit()
-                conn.close()
-
-                payload = json.dumps({"type": "update_msg", "id": mid, "text": new_text, "edited": 1})
-                for ws in active_connections.get(username, []):
-                    try:
-                        await ws.send_text(payload)
-                    except:
-                        pass
-
+            # ---------- ЗАГЛУШКА ДЛЯ ПИНГА ----------
             elif msg_type == "ping":
                 await websocket.send_text(json.dumps({"type": "pong"}))
 
     except WebSocketDisconnect:
-        active_connections[username].discard(websocket)
-        if not active_connections[username]:
-            del active_connections[username]
+        pass
+    except Exception as exc:  # не роняем сервер из-за одной сессии
+        print(f"⚠️ WS ошибка у {username}: {exc}")
+    finally:
+        conns = active_connections.get(username)
+        if conns is not None:
+            conns.discard(websocket)
+            if not conns:
+                active_connections.pop(username, None)
+                conn = db_connect()
+                conn.execute(
+                    "UPDATE users SET last_seen = ? WHERE username = ?",
+                    (int(time.time()), username),
+                )
+                conn.commit()
+                conn.close()
+                await _broadcast_presence(username, False)
         print(f"🔴 {username} отключён")
 
 
 # ============================================
 # СТАТИКА
 # ============================================
-FRONTEND_PATH = Path(__file__).parent.parent / "frontend"
+FRONTEND_PATH = BASE_DIR / "frontend"
 
 
 @app.get("/")
@@ -725,6 +1274,11 @@ async def js():
     return FileResponse(FRONTEND_PATH / "script.js")
 
 
+@app.get("/favicon.ico")
+async def favicon():
+    return FileResponse(FRONTEND_PATH / "favicon.svg", media_type="image/svg+xml")
+
+
 if FRONTEND_PATH.exists():
     app.mount("/static", StaticFiles(directory=FRONTEND_PATH), name="static")
 
@@ -734,12 +1288,13 @@ if FRONTEND_PATH.exists():
 # ============================================
 if __name__ == "__main__":
     import uvicorn
+
     print("🚀 СвапТайм запускается...")
     print("📍 Открой: http://localhost:8000")
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=8000,
+        port=int(os.environ.get("PORT", 8000)),
         ws_ping_interval=20,
         ws_ping_timeout=20,
         timeout_graceful_shutdown=2,
