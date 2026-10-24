@@ -9,6 +9,7 @@ const SERVER_ICONS = ["🏰", "🚀", "🎮", "🎧", "🐉", "🔥", "🌊", "�
 
 let serverMembers = new Map();      // username -> member card
 let serverMessages = [];            // сообщения открытого канала
+let serverPins = [];                // закреплённые в открытом канале
 let serverEditMode = false;         // создаём или редактируем сервер
 let serverTypingSent = 0;
 let serverTypingTimer = null;
@@ -122,6 +123,9 @@ async function openServerChannel(channelId) {
 
   const box = $("server-messages");
   clear(box);
+  serverPins = [];
+  renderServerPinnedBar();
+  hideServerPinsPopover();
   box.appendChild(el("div", "messages-loading", "Загружаю сообщения…"));
 
   try {
@@ -142,6 +146,7 @@ async function openServerChannel(channelId) {
     box.scrollTop = box.scrollHeight;
 
     api(`/api/servers/${state.activeServer}/channels/${channelId}/read`, { method: "POST" }).catch(() => {});
+    refreshServerPins();
     channel.unread = 0;
     renderServerChannels();
     updateServerUnreadInRail();
@@ -170,6 +175,7 @@ function buildServerMessageNode(msg) {
   const author = serverUserCard(msg.from);
 
   const wrapper = el("div", "message-wrapper");
+  if (msg.pinned) wrapper.classList.add("pinned");
   wrapper.dataset.serverMsgId = String(msg.id);
   if (msg.client_id) wrapper.dataset.clientId = msg.client_id;
   if (msg.pending) wrapper.classList.add("pending");
@@ -187,6 +193,7 @@ function buildServerMessageNode(msg) {
   if (role === "owner") header.appendChild(el("span", "role-badge owner", "ВЛАДЕЛЕЦ"));
   else if (role === "admin") header.appendChild(el("span", "role-badge admin", "АДМИН"));
   header.appendChild(el("span", "msg-time", formatTime(msg.created_at)));
+  if (msg.pinned) header.appendChild(el("span", "pin-mark", "📌"));
   content.appendChild(header);
 
   const textEl = el("div", "message" + (isOwn ? " own" : " other"));
@@ -208,6 +215,12 @@ function buildServerMessageNode(msg) {
 
   if (!msg.deleted && msg.id) {
     const actions = el("div", "message-actions");
+
+    const pinBtn = el("button", "msg-btn pin-btn" + (msg.pinned ? " is-pinned" : ""), "📌");
+    pinBtn.type = "button";
+    pinBtn.title = msg.pinned ? "Открепить сообщение" : "Закрепить сообщение";
+    pinBtn.addEventListener("click", () => toggleServerPin(msg));
+    actions.appendChild(pinBtn);
 
     const copyBtn = el("button", "msg-btn", "⧉");
     copyBtn.title = "Скопировать";
@@ -683,6 +696,138 @@ function editServer() {
   openServerModal("edit");
 }
 
+
+// ============================================================
+// ЗАКРЕПЛЁННЫЕ СООБЩЕНИЯ КАНАЛА
+// ============================================================
+async function refreshServerPins() {
+  if (!state.activeServer || !state.activeChannel) {
+    serverPins = [];
+    renderServerPinnedBar();
+    return;
+  }
+  const serverId = state.activeServer;
+  const channelId = state.activeChannel;
+
+  try {
+    const data = await api(`/api/servers/${serverId}/channels/${channelId}/pins`);
+    if (state.activeServer !== serverId || state.activeChannel !== channelId) return;
+    serverPins = data.pins || [];
+  } catch (err) {
+    if (state.activeServer !== serverId) return;
+    serverPins = [];
+  }
+  renderServerPinnedBar();
+  renderServerPinsPopover();
+}
+
+function renderServerPinnedBar() {
+  const bar = $("server-pinned-bar");
+  if (!bar) return;
+
+  if (!serverPins.length) {
+    bar.style.display = "none";
+    hideServerPinsPopover();
+    return;
+  }
+
+  const latest = serverPins[0];
+  const author = serverUserCard(latest.from);
+  $("server-pinned-text").textContent =
+    (author.display_name || author.username) + ": " + (latest.text || "сообщение").slice(0, 90);
+  $("server-pinned-count").textContent = serverPins.length > 99 ? "99+" : String(serverPins.length);
+  bar.style.display = "block";
+}
+
+function renderServerPinsPopover() {
+  const popover = $("server-pins-popover");
+  if (!popover) return;
+  clear(popover);
+
+  if (!serverPins.length) {
+    hideServerPinsPopover();
+    return;
+  }
+
+  const head = el("div", "pins-head");
+  head.appendChild(el("span", "pins-title", "📌 Закреплённые — " + serverPins.length));
+  const close = el("button", "pins-close", "✕");
+  close.type = "button";
+  close.title = "Закрыть";
+  close.addEventListener("click", () => hideServerPinsPopover());
+  head.appendChild(close);
+  popover.appendChild(head);
+
+  const list = el("div", "pins-list");
+  serverPins.forEach((msg) => {
+    const card = serverUserCard(msg.from);
+    const row = el("div", "pin-item");
+
+    const main = el("button", "pin-item-main");
+    main.type = "button";
+    main.appendChild(el("div", "pin-item-author", card.display_name || card.username));
+    main.appendChild(el("div", "pin-item-text", msg.text || "сообщение удалено"));
+    main.appendChild(el("div", "pin-item-time", formatTime(msg.created_at)));
+    main.addEventListener("click", () => {
+      hideServerPinsPopover();
+      jumpToServerPin(msg.id);
+    });
+    row.appendChild(main);
+
+    const un = el("button", "pin-item-unpin", "✕");
+    un.type = "button";
+    un.title = "Открепить";
+    un.addEventListener("click", () => toggleServerPin(msg));
+    row.appendChild(un);
+
+    list.appendChild(row);
+  });
+  popover.appendChild(list);
+}
+
+function hideServerPinsPopover() {
+  const popover = $("server-pins-popover");
+  if (popover) popover.classList.remove("active");
+}
+
+function toggleServerPinsPopover() {
+  const popover = $("server-pins-popover");
+  if (!popover) return;
+  if (popover.classList.contains("active")) {
+    hideServerPinsPopover();
+    return;
+  }
+  renderServerPinsPopover();
+  popover.classList.add("active");
+}
+
+function jumpToServerPin(id) {
+  const node = $("server-messages").querySelector(`[data-server-msg-id="${id}"]`);
+  if (node) {
+    node.scrollIntoView({ behavior: "smooth", block: "center" });
+    node.classList.add("highlight");
+    setTimeout(() => node.classList.remove("highlight"), 1400);
+    return;
+  }
+  const channelId = state.activeChannel;
+  toast("Подгружаю сообщение…", "info", 1200);
+  openServerChannel(channelId).then(() => {
+    setTimeout(() => {
+      const loaded = $("server-messages").querySelector(`[data-server-msg-id="${id}"]`);
+      if (!loaded) return;
+      loaded.scrollIntoView({ behavior: "smooth", block: "center" });
+      loaded.classList.add("highlight");
+      setTimeout(() => loaded.classList.remove("highlight"), 1400);
+    }, 80);
+  });
+}
+
+function toggleServerPin(msg) {
+  if (!msg || !msg.id) return;
+  const next = !msg.pinned;
+  sendWS({ type: "server_pin_msg", id: msg.id, pinned: next });
+}
+
 // ============================================================
 // СОБЫТИЯ WS
 // ============================================================
@@ -709,6 +854,28 @@ function handleServerEvent(msg) {
       if (msg.server_id === state.activeServer && msg.channel_id === state.activeChannel) {
         upsertServerMessage(msg);
       }
+      break;
+    }
+
+    case "server_pin_changed": {
+      if (msg.server_id !== state.activeServer) break;
+      if (msg.channel_id !== state.activeChannel) break;
+      const data = msg.message;
+      if (!data) break;
+
+      const known = serverMessages.find((m) => m.id === data.id);
+      if (known) Object.assign(known, data);
+      serverPins = serverPins.filter((p) => p.id !== data.id);
+      if (data.pinned && !data.deleted) serverPins.unshift(data);
+
+      const node = $("server-messages").querySelector(`[data-server-msg-id="${data.id}"]`);
+      if (node) {
+        node.replaceWith(buildServerMessageNode(Object.assign({}, known || data)));
+        groupServerMessages();
+      }
+      renderServerPinnedBar();
+      renderServerPinsPopover();
+      toast(data.pinned ? "Сообщение закреплено" : "Сообщение откреплено", "success", 1600);
       break;
     }
 

@@ -72,6 +72,34 @@ function fakeFetch(url, options = {}) {
     return jsonResponse({ servers: [{ id: 1, name: "Тусовка", icon: "🎮", icon_color: "#6366f1", unread: 2 }] });
   }
   if (clean === "/api/servers/1") return jsonResponse({ ...SERVER });
+  if (clean === "/api/servers/1/channels/10/pins") {
+    return jsonResponse({
+      pins: [
+        { id: 1, channel_id: 10, from: "bob", text: "привет", edited: 0, deleted: 0,
+          created_at: 1700000100, pinned: true, pinned_by: "alice", pinned_at: 1700000200 },
+      ],
+    });
+  }
+  if (/^\/api\/servers\/1\/channels\/10\/messages\/\d+\/pin$/.test(clean)) {
+    return jsonResponse({ ok: true });
+  }
+  if (clean === "/api/messages/alice/bob") {
+    return jsonResponse([
+      { id: 7, from: "bob", to: "alice", text: "привет", reply_to: 0, edited: 0, deleted: 0,
+        created_at: 1700000100, pinned: true, pinned_by: "bob", pinned_at: 1700000200 },
+      { id: 8, from: "alice", to: "bob", text: "как дела", reply_to: 0, edited: 0, deleted: 0,
+        created_at: 1700000300, pinned: false, pinned_by: "", pinned_at: 0 },
+    ]);
+  }
+  if (clean === "/api/pins/bob") {
+    return jsonResponse({
+      pins: [
+        { id: 7, from: "bob", to: "alice", text: "привет", reply_to: 0, edited: 0, deleted: 0,
+          created_at: 1700000100, pinned: true, pinned_by: "bob", pinned_at: 1700000200 },
+      ],
+    });
+  }
+  if (clean === "/api/messages/pin") return jsonResponse({ ok: true, message: { id: body.message_id, pinned: body.pinned } });
   if (clean === "/api/servers/1/channels/10/messages") {
     if ((options.method || "GET") === "POST") {
       return jsonResponse({ ok: true, message: { id: 100, channel_id: 10, from: "alice", text: body.text, created_at: 1700000500 } });
@@ -201,8 +229,9 @@ function makeWindow() {
     js +
       "\nwindow.__api = { state, setView, openServer, openServerChannel, openTgChannel, openSettings," +
       " saveSettings, openTgModal, publishPost, startCall, acceptIncomingCall, handleCallEvent," +
-      " handleServerEvent, handleTgEvent, toggleMic, toggleScreenShare, applyCallSettings," +
-      " toggleCallSettingsPanel, renderServerChannels, initCallSettings };" +
+      " handleServerEvent, handleTgEvent, handlePinEvent: handlePinChanged," +
+      " toggleMic, toggleScreenShare, applyCallSettings, toggleCallSettingsPanel," +
+      " renderServerChannels, initCallSettings, openChat, togglePinsPopover, toggleServerPinsPopover };" +
       "\nwindow.__SERVER = " + JSON.stringify(SERVER) + ";"
   );
 
@@ -366,6 +395,79 @@ async function run() {
   assert(document.getElementById("tg-modal").classList.contains("active"));
   assert(document.querySelectorAll("#tg-color-row .color-dot").length >= 8, "палитра цветов канала");
 
+
+  // ---------- закреплённые сообщения (личный чат) ----------
+  api.setView("chats");
+  await api.openChat("bob");
+  await tick(80);
+  assert.strictEqual(document.getElementById("pinned-bar").style.display, "block", "панель закреплённых видна");
+  assert.strictEqual(document.getElementById("pinned-count").textContent, "1");
+  assert(document.getElementById("pinned-text").textContent.includes("привет"), "превью закреплённого");
+  assert(document.querySelector('#messages [data-msg-id="7"]').classList.contains("pinned"), "сообщение помечено");
+  assert(document.querySelector('#messages [data-msg-id="7"] .pin-mark'), "иконка закрепления в сообщении");
+
+  // закрепляем второе сообщение кнопкой
+  document.querySelector('#messages [data-msg-id="8"] .pin-btn').click();
+  await tick(30);
+  const wsPin = ws.sent.filter((m) => m.type === "pin_msg").pop();
+  assert(wsPin && wsPin.id === 8 && wsPin.pinned === true, "pin_msg ушёл по WS");
+
+  // сервер подтверждает — панель и попап обновляются
+  api.handlePinEvent({
+    type: "pin_changed",
+    message: { id: 8, from: "alice", to: "bob", text: "как дела", reply_to: 0, edited: 0, deleted: 0,
+      created_at: 1700000300, pinned: true, pinned_by: "alice", pinned_at: 1700000400 },
+  });
+  await tick(30);
+  assert.strictEqual(document.getElementById("pinned-count").textContent, "2", "счётчик закреплённых");
+  assert(document.querySelector('#messages [data-msg-id="8"]').classList.contains("pinned"));
+
+  api.togglePinsPopover();
+  await tick(20);
+  assert(document.getElementById("pins-popover").classList.contains("active"), "попап открыт");
+  assert.strictEqual(document.querySelectorAll("#pins-popover .pin-item").length, 2, "два закреплённых в списке");
+
+  // открепляем из попапа
+  document.querySelector("#pins-popover .pin-item-unpin").click();
+  await tick(30);
+  const unPin = ws.sent.filter((m) => m.type === "pin_msg").pop();
+  assert(unPin.pinned === false, "открепление уходит по WS");
+
+  api.handlePinEvent({
+    type: "pin_changed",
+    message: { id: 8, from: "alice", to: "bob", text: "как дела", reply_to: 0, edited: 0, deleted: 0,
+      created_at: 1700000300, pinned: false, pinned_by: "", pinned_at: 0 },
+  });
+  await tick(30);
+  assert.strictEqual(document.getElementById("pinned-count").textContent, "1", "снова одна закреплённая");
+  assert(!document.querySelector('#messages [data-msg-id="8"]').classList.contains("pinned"));
+
+  // ---------- закреплённые в канале сервера ----------
+  document.querySelector("#server-list .server-btn").click();
+  await tick(80);
+  assert.strictEqual(document.getElementById("server-pinned-bar").style.display, "block", "панель в канале сервера");
+  assert.strictEqual(document.getElementById("server-pinned-count").textContent, "1");
+  document.getElementById("server-pinned-text").textContent.includes("привет");
+
+  api.toggleServerPinsPopover();
+  await tick(20);
+  assert(document.getElementById("server-pins-popover").classList.contains("active"));
+  assert.strictEqual(document.querySelectorAll("#server-pins-popover .pin-item").length, 1);
+
+  document.querySelector("#server-messages .pin-btn").click();
+  await tick(30);
+  const srvPin = ws.sent.filter((m) => m.type === "server_pin_msg").pop();
+  assert(srvPin && srvPin.id === 1 && srvPin.pinned === true, "server_pin_msg ушёл по WS");
+
+  api.handleServerEvent({
+    type: "server_pin_changed", server_id: 1, channel_id: 10,
+    message: { id: 1, channel_id: 10, from: "bob", text: "привет", edited: 0, deleted: 0,
+      client_id: null, created_at: 1700000100, pinned: true, pinned_by: "alice", pinned_at: 1700000500 },
+  });
+  await tick(30);
+  assert(document.querySelector('#server-messages [data-server-msg-id="1"]').classList.contains("pinned"));
+  assert.strictEqual(document.getElementById("server-pinned-count").textContent, "1", "без дублей в списке");
+
   // ---------- звонки ----------
   assert(state.callSettings, "настройки звонка инициализированы");
   assert.strictEqual(state.callSettings.quality, "1080p");
@@ -431,7 +533,7 @@ async function run() {
   assert(ws.sent.some((m) => m.type === "call" && m.action === "accept" && m.call_id === "c-2"));
 
   assert.strictEqual(errors.length, 0, "ошибки по ходу теста: " + errors.join("; "));
-  console.log("✅ Тесты v10 (темы, серверы, каналы, звонки) прошли");
+  console.log("✅ Тесты v10 (темы, серверы, каналы, звонки, закреплённые) прошли");
   process.exit(0); // таймеры звонка держат event loop — выходим явно
 }
 

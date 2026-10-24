@@ -122,6 +122,7 @@ const state = {
   current: null,
   messages: new Map(),
   byClientId: new Map(),
+  pins: [],               // закреплённые в открытом личном чате
   avatarCache: new Map(),
 
   ws: null,
@@ -972,6 +973,7 @@ async function openChat(username) {
   if (state.current !== username) return;
   markRead(username);
   renderTitle();
+  refreshPins();
 
   if (window.matchMedia("(min-width: 761px)").matches) $("message-input").focus();
 }
@@ -1011,6 +1013,8 @@ function closeChat() {
   $("typing-line").style.display = "none";
   cancelReply();
   cancelEdit();
+  state.pins = [];
+  renderPinnedBar();
   renderDMList();
   renderTitle();
 }
@@ -1054,6 +1058,7 @@ function buildMessageNode(msg) {
   const author = userForMessage(msg.from);
 
   const wrapper = el("div", "message-wrapper" + (isOwn ? " own" : ""));
+  if (msg.pinned) wrapper.classList.add("pinned");
   if (msg.id) wrapper.dataset.msgId = String(msg.id);
   if (msg.client_id) wrapper.dataset.clientId = String(msg.client_id);
   if (msg.pending) wrapper.classList.add("pending");
@@ -1072,6 +1077,7 @@ function buildMessageNode(msg) {
   header.appendChild(authorName);
   if (isOwn) header.appendChild(el("span", "msg-bot", "ТЫ"));
   header.appendChild(el("span", "msg-time", formatTime(msg.created_at)));
+  if (msg.pinned) header.appendChild(el("span", "pin-mark", "📌"));
   content.appendChild(header);
 
   if (msg.reply_to) {
@@ -1129,6 +1135,14 @@ function buildMessageNode(msg) {
     replyBtn.title = "Ответить";
     replyBtn.addEventListener("click", () => startReply(msg));
     actions.appendChild(replyBtn);
+
+    if (msg.id) {
+      const pinBtn = el("button", "msg-btn pin-btn" + (msg.pinned ? " is-pinned" : ""), "📌");
+      pinBtn.type = "button";
+      pinBtn.title = msg.pinned ? "Открепить сообщение" : "Закрепить сообщение";
+      pinBtn.addEventListener("click", () => togglePinMessage(msg));
+      actions.appendChild(pinBtn);
+    }
 
     if (isOwn && msg.id) {
       const editBtn = el("button", "msg-btn", "✏️");
@@ -1236,6 +1250,162 @@ function focusMessage(id) {
   node.scrollIntoView({ behavior: "smooth", block: "center" });
   node.classList.add("highlight");
   setTimeout(() => node.classList.remove("highlight"), 1200);
+}
+
+
+// ============================================================
+// ЗАКРЕПЛЁННЫЕ СООБЩЕНИЯ (личные чаты)
+// ============================================================
+async function refreshPins() {
+  const username = state.current;
+  if (!username) {
+    state.pins = [];
+    renderPinnedBar();
+    return;
+  }
+  if (typeof hidePinsPopover === "function") hidePinsPopover();
+
+  try {
+    const data = await api("/api/pins/" + encodeURIComponent(username));
+    if (state.current !== username) return;
+    state.pins = data.pins || [];
+  } catch (err) {
+    if (state.current !== username) return;
+    state.pins = [];
+  }
+  renderPinnedBar();
+  renderPinsPopover();
+}
+
+function renderPinnedBar() {
+  const bar = $("pinned-bar");
+  if (!bar) return;
+
+  const pins = state.pins || [];
+  if (!pins.length) {
+    bar.style.display = "none";
+    hidePinsPopover();
+    return;
+  }
+
+  const latest = pins[0];
+  $("pinned-text").textContent =
+    (displayNameFor(latest.from) || "Кто-то") + ": " + (latest.text || "сообщение").slice(0, 90);
+  $("pinned-count").textContent = pins.length > 99 ? "99+" : String(pins.length);
+  bar.style.display = "block";
+}
+
+function renderPinsPopover() {
+  const popover = $("pins-popover");
+  if (!popover) return;
+  clear(popover);
+
+  const pins = state.pins || [];
+  if (!pins.length) {
+    hidePinsPopover();
+    return;
+  }
+
+  const head = el("div", "pins-head");
+  head.appendChild(el("span", "pins-title", "📌 Закреплённые — " + pins.length));
+  const close = el("button", "pins-close", "✕");
+  close.type = "button";
+  close.title = "Закрыть";
+  close.addEventListener("click", () => hidePinsPopover());
+  head.appendChild(close);
+  popover.appendChild(head);
+
+  const list = el("div", "pins-list");
+  pins.forEach((msg) => {
+    const row = el("div", "pin-item");
+
+    const main = el("button", "pin-item-main");
+    main.type = "button";
+    main.appendChild(el("div", "pin-item-author", displayNameFor(msg.from) || msg.from));
+    main.appendChild(el("div", "pin-item-text", msg.text || "сообщение удалено"));
+    main.appendChild(el("div", "pin-item-time", formatTime(msg.created_at)));
+    main.addEventListener("click", () => {
+      hidePinsPopover();
+      jumpToPin(msg.id);
+    });
+    row.appendChild(main);
+
+    const un = el("button", "pin-item-unpin", "✕");
+    un.type = "button";
+    un.title = "Открепить";
+    un.addEventListener("click", () => togglePinMessage(msg));
+    row.appendChild(un);
+
+    list.appendChild(row);
+  });
+  popover.appendChild(list);
+}
+
+function hidePinsPopover() {
+  const popover = $("pins-popover");
+  if (popover) popover.classList.remove("active");
+}
+
+function togglePinsPopover() {
+  const popover = $("pins-popover");
+  if (!popover) return;
+  if (popover.classList.contains("active")) {
+    hidePinsPopover();
+    return;
+  }
+  renderPinsPopover();
+  popover.classList.add("active");
+}
+
+function jumpToPin(id) {
+  const node = $("messages").querySelector(`[data-msg-id="${id}"]`);
+  if (node) {
+    node.scrollIntoView({ behavior: "smooth", block: "center" });
+    node.classList.add("highlight");
+    setTimeout(() => node.classList.remove("highlight"), 1400);
+    return;
+  }
+  toast("Подгружаю сообщение…", "info", 1200);
+  reloadCurrentChat().then(() => setTimeout(() => focusMessage(id), 60));
+}
+
+function togglePinMessage(msg) {
+  if (!msg || !msg.id) return;
+  const next = !msg.pinned;
+  const sent = sendWS({ type: "pin_msg", id: msg.id, pinned: next });
+  if (!sent) {
+    api("/api/messages/pin", { method: "POST", body: { message_id: msg.id, pinned: next } })
+      .catch((err) => toast(err.message || "Не удалось закрепить", "error"));
+  }
+}
+
+function handlePinChanged(msg) {
+  const data = msg.message;
+  if (!data) return;
+
+  const other = data.from === state.user.username ? data.to : data.from;
+  if (state.current !== other) return;
+
+  const known = state.messages.get(data.id);
+  if (known) Object.assign(known, data);
+  if (data.deleted) {
+    // удалённое сообщение больше не показываем среди закреплённых
+    state.pins = state.pins.filter((p) => p.id !== data.id);
+  } else {
+    state.pins = state.pins.filter((p) => p.id !== data.id);
+    if (data.pinned) state.pins.unshift(data);
+  }
+
+  const node = $("messages").querySelector(`[data-msg-id="${data.id}"]`);
+  if (node) {
+    const replacement = buildMessageNode(Object.assign({}, known || data));
+    node.replaceWith(replacement);
+    applyGrouping();
+  }
+
+  renderPinnedBar();
+  renderPinsPopover();
+  toast(data.pinned ? "Сообщение закреплено" : "Сообщение откреплено", "success", 1600);
 }
 
 // ============================================================
@@ -1517,6 +1687,7 @@ function handleSocketMessage(msg) {
     case "friend_changed": refreshChats(); break;
     case "profile_updated": onFriendProfileUpdated(msg.user); break;
     case "error": handleServerError(msg); break;
+    case "pin_changed": handlePinChanged(msg); break;
     case "pong": break;
 
     // ---- серверы ----
@@ -2368,6 +2539,10 @@ const ACTIONS = {
   "close-profile": () => closeProfile(),
   "chat-profile": () => openChatProfile(),
   "close-chat": () => closeChatMobile(),
+  "toggle-pins": () => togglePinsPopover(),
+  "toggle-server-pins": () => {
+    if (typeof toggleServerPinsPopover === "function") toggleServerPinsPopover();
+  },
   "cancel-reply": () => cancelReply(),
   "cancel-edit": () => cancelEdit(),
   "write-to-user": () => writeToUser(),

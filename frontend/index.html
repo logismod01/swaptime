@@ -237,6 +237,15 @@
                             </div>
                         </header>
 
+                        <div class="pinned-bar" id="pinned-bar" style="display:none;">
+                            <button class="pinned-preview" data-action="toggle-pins" title="Закреплённые сообщения">
+                                <span class="pinned-icon">📌</span>
+                                <span class="pinned-text" id="pinned-text">Закреплённое сообщение</span>
+                                <span class="pinned-count" id="pinned-count">1</span>
+                            </button>
+                        </div>
+                        <div class="pins-popover" id="pins-popover"></div>
+
                         <div class="messages" id="messages"></div>
 
                         <div class="typing-line" id="typing-line" style="display:none;">печатает…</div>
@@ -300,6 +309,15 @@
                             <button class="icon-btn" data-action="server-menu" title="Меню сервера">☰</button>
                         </div>
                     </header>
+
+                    <div class="pinned-bar" id="server-pinned-bar" style="display:none;">
+                        <button class="pinned-preview" data-action="toggle-server-pins" title="Закреплённые сообщения канала">
+                            <span class="pinned-icon">📌</span>
+                            <span class="pinned-text" id="server-pinned-text">Закреплённое сообщение</span>
+                            <span class="pinned-count" id="server-pinned-count">1</span>
+                        </button>
+                    </div>
+                    <div class="pins-popover" id="server-pins-popover"></div>
 
                     <div class="messages" id="server-messages"></div>
                     <div class="typing-line" id="server-typing" style="display:none;">печатает…</div>

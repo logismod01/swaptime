@@ -317,6 +317,12 @@ def init_db() -> None:
     _add_column(c, "users", "bio", "TEXT DEFAULT ''")
     _add_column(c, "users", "theme", "TEXT DEFAULT 'midnight'")
     _add_column(c, "messages", "client_id", "TEXT")
+    _add_column(c, "messages", "pinned", "INTEGER DEFAULT 0")
+    _add_column(c, "messages", "pinned_by", "TEXT DEFAULT ''")
+    _add_column(c, "messages", "pinned_at", "INTEGER DEFAULT 0")
+    _add_column(c, "server_messages", "pinned", "INTEGER DEFAULT 0")
+    _add_column(c, "server_messages", "pinned_by", "TEXT DEFAULT ''")
+    _add_column(c, "server_messages", "pinned_at", "INTEGER DEFAULT 0")
 
     c.execute("CREATE INDEX IF NOT EXISTS idx_msg_pair ON messages(from_user, to_user, id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_msg_to ON messages(to_user, id)")
@@ -325,6 +331,8 @@ def init_db() -> None:
     c.execute("CREATE INDEX IF NOT EXISTS idx_srv_msg ON server_messages(channel_id, id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_srv_members ON server_members(server_id, username)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_tg_posts ON tg_posts(channel_id, id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_msg_pinned ON messages(pinned)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_srv_msg_pinned ON server_messages(pinned)")
 
     conn.commit()
     conn.close()
@@ -539,6 +547,15 @@ class MessageAction(BaseModel):
     new_text: str = ""
 
 
+class MessagePin(BaseModel):
+    message_id: int
+    pinned: bool = True
+
+
+class PinToggle(BaseModel):
+    pinned: bool = True
+
+
 class MarkRead(BaseModel):
     to_user: str
     from_user: Optional[str] = None  # игнорируется
@@ -656,7 +673,13 @@ def mark_read(username: str, chat_with: str) -> int:
 # СЕРИАЛИЗАЦИЯ СООБЩЕНИЙ
 # ============================================
 MSG_COLUMNS = (
-    "id, from_user, to_user, text, reply_to, edited, deleted, client_id, created_at"
+    "id, from_user, to_user, text, reply_to, edited, deleted, client_id, created_at, "
+    "pinned, pinned_by, pinned_at"
+)
+
+SRV_MSG_COLUMNS = (
+    "id, channel_id, from_user, text, edited, deleted, client_id, created_at, "
+    "pinned, pinned_by, pinned_at"
 )
 
 
@@ -693,6 +716,9 @@ def message_dict(row: sqlite3.Row, replies: Dict[int, dict]) -> dict:
         "edited": row["edited"],
         "deleted": row["deleted"],
         "created_at": row["created_at"],
+        "pinned": bool(row["pinned"]),
+        "pinned_by": row["pinned_by"] or "",
+        "pinned_at": row["pinned_at"] or 0,
     }
 
 
@@ -1101,12 +1127,72 @@ async def delete_message(data: MessageAction, user: str = Depends(auth_user)):
         conn.close()
         raise HTTPException(403, "Это не твоё сообщение")
 
-    conn.execute("UPDATE messages SET deleted = 1, text = '' WHERE id = ?", (data.message_id,))
+    conn.execute(
+        "UPDATE messages SET deleted = 1, text = '', pinned = 0, pinned_by = '', pinned_at = 0 "
+        "WHERE id = ?",
+        (data.message_id,),
+    )
     conn.commit()
     msg = fetch_message(conn, data.message_id)
     conn.close()
 
     await _broadcast_message_update(msg)
+    return {"ok": True, "message": msg}
+
+
+@app.get("/api/pins/{other}")
+async def get_pins(other: str, user: str = Depends(auth_user)):
+    """Закреплённые сообщения личного чата."""
+    other = other.strip().lower()
+    if not _can_chat(user, other):
+        raise HTTPException(403, "Нет доступа к этому чату")
+
+    conn = db_connect()
+    rows = conn.execute(
+        f"""
+        SELECT {MSG_COLUMNS} FROM messages
+        WHERE pinned = 1 AND deleted = 0
+          AND ((from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?))
+        ORDER BY pinned_at DESC, id DESC LIMIT 50
+        """,
+        (user, other, other, user),
+    ).fetchall()
+    replies = _replies_map(conn, [r["reply_to"] for r in rows])
+    pins = [message_dict(r, replies) for r in rows]
+    conn.close()
+    return {"pins": pins}
+
+
+@app.post("/api/messages/pin")
+async def pin_message(data: MessagePin, user: str = Depends(auth_user)):
+    """Закрепить/открепить сообщение в личном чате (REST-фолбэк для WS)."""
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT from_user, to_user, deleted FROM messages WHERE id = ?", (data.message_id,)
+    ).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Сообщение не найдено")
+    if user not in (row["from_user"], row["to_user"]):
+        conn.close()
+        raise HTTPException(403, "Это чужой чат")
+    if row["deleted"] and data.pinned:
+        conn.close()
+        raise HTTPException(400, "Сообщение удалено")
+
+    now = int(time.time())
+    conn.execute(
+        "UPDATE messages SET pinned = ?, pinned_by = ?, pinned_at = ? WHERE id = ?",
+        (1 if data.pinned else 0, user if data.pinned else "", now if data.pinned else 0,
+         data.message_id),
+    )
+    conn.commit()
+    msg = fetch_message(conn, data.message_id)
+    conn.close()
+
+    payload = {"type": "pin_changed", "message": msg}
+    await send_to_user(msg["from"], payload)
+    await send_to_user(msg["to"], payload)
     return {"ok": True, "message": msg}
 
 
@@ -1814,6 +1900,9 @@ def _server_message_dict(row: sqlite3.Row, conn: sqlite3.Connection) -> dict:
         "deleted": row["deleted"],
         "client_id": row["client_id"],
         "created_at": row["created_at"],
+        "pinned": bool(row["pinned"]),
+        "pinned_by": row["pinned_by"] or "",
+        "pinned_at": row["pinned_at"] or 0,
     }
 
 
@@ -1835,7 +1924,7 @@ async def server_messages(
         raise HTTPException(404, "Канал не найден")
 
     rows = conn.execute(
-        "SELECT id, channel_id, from_user, text, edited, deleted, client_id, created_at "
+        f"SELECT {SRV_MSG_COLUMNS} "
         "FROM server_messages WHERE channel_id = ? ORDER BY id DESC LIMIT ?",
         (channel_id, limit),
     ).fetchall()
@@ -1874,15 +1963,83 @@ async def post_server_message(
     msg_id = cur.lastrowid
     conn.commit()
     row = conn.execute(
-        "SELECT id, channel_id, from_user, text, edited, deleted, client_id, created_at "
-        "FROM server_messages WHERE id = ?",
-        (msg_id,),
+        f"SELECT {SRV_MSG_COLUMNS} FROM server_messages WHERE id = ?", (msg_id,)
     ).fetchone()
     payload = {"type": "server_message", "server_id": server_id, **_server_message_dict(row, conn)}
     conn.close()
 
     await broadcast_to_server(server_id, payload)
     return payload
+
+
+@app.get("/api/servers/{server_id}/channels/{channel_id}/pins")
+async def server_channel_pins(server_id: int, channel_id: int, user: str = Depends(auth_user)):
+    if not server_role(server_id, user):
+        raise HTTPException(403, "Ты не участник этого сервера")
+
+    conn = db_connect()
+    if not conn.execute(
+        "SELECT 1 FROM server_channels WHERE id = ? AND server_id = ?", (channel_id, server_id)
+    ).fetchone():
+        conn.close()
+        raise HTTPException(404, "Канал не найден")
+
+    rows = conn.execute(
+        f"SELECT {SRV_MSG_COLUMNS} FROM server_messages "
+        "WHERE channel_id = ? AND pinned = 1 AND deleted = 0 "
+        "ORDER BY pinned_at DESC, id DESC LIMIT 50",
+        (channel_id,),
+    ).fetchall()
+    pins = [_server_message_dict(r, conn) for r in rows]
+    conn.close()
+    return {"pins": pins}
+
+
+@app.post("/api/servers/{server_id}/channels/{channel_id}/messages/{message_id}/pin")
+async def pin_server_message(
+    server_id: int,
+    channel_id: int,
+    message_id: int,
+    data: PinToggle,
+    user: str = Depends(auth_user),
+):
+    """Закрепить/открепить сообщение в канале сервера — может любой участник."""
+    if not server_role(server_id, user):
+        raise HTTPException(403, "Ты не участник этого сервера")
+
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT m.deleted FROM server_messages m JOIN server_channels c ON c.id = m.channel_id "
+        "WHERE m.id = ? AND m.channel_id = ? AND c.server_id = ?",
+        (message_id, channel_id, server_id),
+    ).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Сообщение не найдено")
+    if row["deleted"] and data.pinned:
+        conn.close()
+        raise HTTPException(400, "Сообщение удалено")
+
+    now = int(time.time())
+    conn.execute(
+        "UPDATE server_messages SET pinned = ?, pinned_by = ?, pinned_at = ? WHERE id = ?",
+        (1 if data.pinned else 0, user if data.pinned else "", now if data.pinned else 0, message_id),
+    )
+    conn.commit()
+    msg = _server_message_dict(
+        conn.execute(f"SELECT {SRV_MSG_COLUMNS} FROM server_messages WHERE id = ?",
+                     (message_id,)).fetchone(),
+        conn,
+    )
+    conn.close()
+
+    await broadcast_to_server(server_id, {
+        "type": "server_pin_changed",
+        "server_id": server_id,
+        "channel_id": channel_id,
+        "message": msg,
+    })
+    return {"ok": True, "message": msg}
 
 
 @app.post("/api/servers/{server_id}/channels/{channel_id}/read")
@@ -2583,11 +2740,57 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(defa
                     }, ensure_ascii=False))
                     continue
 
-                conn.execute("UPDATE messages SET deleted = 1, text = '' WHERE id = ?", (mid,))
+                conn.execute(
+                    "UPDATE messages SET deleted = 1, text = '', pinned = 0, pinned_by = '', "
+                    "pinned_at = 0 WHERE id = ?",
+                    (mid,),
+                )
                 conn.commit()
                 updated = fetch_message(conn, mid)
                 conn.close()
                 await _broadcast_message_update(updated)
+
+            # ---------- ЗАКРЕПЛЕНИЕ В ЛИЧКЕ ----------
+            elif msg_type == "pin_msg":
+                try:
+                    mid = int(msg.get("id"))
+                except (TypeError, ValueError):
+                    continue
+                want_pinned = bool(msg.get("pinned", True))
+
+                conn = db_connect()
+                row = conn.execute(
+                    "SELECT from_user, to_user, deleted FROM messages WHERE id = ?", (mid,)
+                ).fetchone()
+                if not row:
+                    conn.close()
+                    await websocket.send_text(json.dumps({
+                        "type": "error", "text": "Сообщение не найдено",
+                    }, ensure_ascii=False))
+                    continue
+                if username not in (row["from_user"], row["to_user"]):
+                    conn.close()
+                    await websocket.send_text(json.dumps({
+                        "type": "error", "text": "Это чужой чат",
+                    }, ensure_ascii=False))
+                    continue
+                if row["deleted"] and want_pinned:
+                    conn.close()
+                    continue
+
+                now = int(time.time())
+                conn.execute(
+                    "UPDATE messages SET pinned = ?, pinned_by = ?, pinned_at = ? WHERE id = ?",
+                    (1 if want_pinned else 0, username if want_pinned else "",
+                     now if want_pinned else 0, mid),
+                )
+                conn.commit()
+                updated = fetch_message(conn, mid)
+                conn.close()
+
+                payload = {"type": "pin_changed", "message": updated}
+                await send_to_user(updated["from"], payload)
+                await send_to_user(updated["to"], payload)
 
             # ---------- ПРОЧИТАНО ----------
             elif msg_type == "read":
@@ -2652,8 +2855,7 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(defa
                 msg_id = cur.lastrowid
                 conn.commit()
                 row = conn.execute(
-                    "SELECT id, channel_id, from_user, text, edited, deleted, client_id, created_at "
-                    "FROM server_messages WHERE id = ?",
+                    f"SELECT {SRV_MSG_COLUMNS} FROM server_messages WHERE id = ?",
                     (msg_id,),
                 ).fetchone()
                 payload = {"type": "server_message", "server_id": server_id,
@@ -2684,8 +2886,7 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(defa
                 conn.execute("UPDATE server_messages SET text = ?, edited = 1 WHERE id = ?", (text, mid))
                 conn.commit()
                 updated = conn.execute(
-                    "SELECT id, channel_id, from_user, text, edited, deleted, client_id, created_at "
-                    "FROM server_messages WHERE id = ?",
+                    f"SELECT {SRV_MSG_COLUMNS} FROM server_messages WHERE id = ?",
                     (mid,),
                 ).fetchone()
                 payload = {"type": "server_message_updated", "server_id": row["server_id"],
@@ -2714,15 +2915,58 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(defa
                     conn.close()
                     continue
 
-                conn.execute("UPDATE server_messages SET deleted = 1, text = '' WHERE id = ?", (mid,))
+                conn.execute(
+                    "UPDATE server_messages SET deleted = 1, text = '', pinned = 0, "
+                    "pinned_by = '', pinned_at = 0 WHERE id = ?",
+                    (mid,),
+                )
                 conn.commit()
                 updated = conn.execute(
-                    "SELECT id, channel_id, from_user, text, edited, deleted, client_id, created_at "
-                    "FROM server_messages WHERE id = ?",
+                    f"SELECT {SRV_MSG_COLUMNS} FROM server_messages WHERE id = ?",
                     (mid,),
                 ).fetchone()
                 payload = {"type": "server_message_updated", "server_id": row["server_id"],
                            **_server_message_dict(updated, conn)}
+                conn.close()
+                await broadcast_to_server(row["server_id"], payload)
+
+            elif msg_type == "server_pin_msg":
+                try:
+                    mid = int(msg.get("id"))
+                except (TypeError, ValueError):
+                    continue
+                want_pinned = bool(msg.get("pinned", True))
+
+                conn = db_connect()
+                row = conn.execute(
+                    "SELECT m.channel_id, m.deleted, c.server_id FROM server_messages m "
+                    "JOIN server_channels c ON c.id = m.channel_id WHERE m.id = ?",
+                    (mid,),
+                ).fetchone()
+                if not row or not server_role(row["server_id"], username):
+                    conn.close()
+                    continue
+                if row["deleted"] and want_pinned:
+                    conn.close()
+                    continue
+
+                now = int(time.time())
+                conn.execute(
+                    "UPDATE server_messages SET pinned = ?, pinned_by = ?, pinned_at = ? "
+                    "WHERE id = ?",
+                    (1 if want_pinned else 0, username if want_pinned else "",
+                     now if want_pinned else 0, mid),
+                )
+                conn.commit()
+                updated = conn.execute(
+                    f"SELECT {SRV_MSG_COLUMNS} FROM server_messages WHERE id = ?", (mid,)
+                ).fetchone()
+                payload = {
+                    "type": "server_pin_changed",
+                    "server_id": row["server_id"],
+                    "channel_id": row["channel_id"],
+                    "message": _server_message_dict(updated, conn),
+                }
                 conn.close()
                 await broadcast_to_server(row["server_id"], payload)
 
