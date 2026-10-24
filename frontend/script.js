@@ -695,6 +695,8 @@ function moveMeBar(target) {
 
 function setView(view, options = {}) {
   state.view = view;
+  // личные сообщения и друзья живут в сайдбаре — мобильную панель закрываем
+  if (view === "chats" || view === "friends") setMobilePane(false);
 
   const isServer = view === "server";
   $("home-sidebar").style.display = isServer ? "none" : "flex";
@@ -761,6 +763,9 @@ function renderDMList() {
     return;
   }
 
+  const needle = query.replace(/^@/, "");
+  let visible = 0;
+
   state.chats.forEach((chat) => {
     const item = el("div", "user-item");
     item.dataset.username = chat.username;
@@ -789,14 +794,23 @@ function renderDMList() {
     info.appendChild(bottom);
     item.appendChild(info);
 
-    if (query) {
+    if (needle) {
       const haystack = ((chat.display_name || "") + " " + chat.username).toLowerCase();
-      if (!haystack.includes(query)) item.style.display = "none";
+      if (!haystack.includes(needle)) item.style.display = "none";
+      else visible += 1;
     }
 
     item.addEventListener("click", () => openChat(chat.username));
     listEl.appendChild(item);
   });
+
+  if (needle && !visible) {
+    const empty = el("div", "empty-state");
+    empty.appendChild(el("div", "empty-state-icon", "🔍"));
+    empty.appendChild(el("div", "empty-state-text", "Ничего не найдено"));
+    empty.appendChild(el("div", "empty-state-hint", "Попробуй другой ник"));
+    listEl.appendChild(empty);
+  }
 }
 
 function renderRequests() {
@@ -937,6 +951,7 @@ async function openChat(username) {
   cancelEdit();
 
   state.current = username;
+  setMobilePane(false);
   $("chat-screen").classList.add("chat-open");
   $("no-chat").style.display = "none";
   $("chat-active").style.display = "flex";
@@ -1021,6 +1036,14 @@ function closeChat() {
 
 function closeChatMobile() {
   closeChat();
+}
+
+/* На телефоне панель чата/канала занимает весь экран: класс pane-open
+   прячет сайдбар (display у него инлайновый, поэтому в CSS есть !important).
+   На широком экране класс ни на что не влияет. */
+function setMobilePane(open) {
+  const screen = $("chat-screen");
+  if (screen) screen.classList.toggle("pane-open", !!open);
 }
 
 function openChatProfile() {
@@ -2572,7 +2595,7 @@ const ACTIONS = {
   "close-join-modal": () => closeModal("join-server-modal"),
   "join-server": () => joinServer(),
   "toggle-members": () => toggleMembers(),
-  "close-server-chat": () => { setView("chats"); },
+  "close-server-chat": () => { setMobilePane(false); },
 
   // каналы (telegram)
   "create-channel": () => openTgModal(),
@@ -2584,7 +2607,7 @@ const ACTIONS = {
   "tg-subscribe": () => toggleTgSubscription(),
   "tg-settings": () => openTgSettings(),
   "publish-post": () => publishPost(),
-  "close-tg": () => { setView("chats"); },
+  "close-tg": () => { setMobilePane(false); },
 
   // звонки
   "start-audio-call": () => startCall({ video: false }),
@@ -2633,7 +2656,10 @@ function bindEvents() {
   });
 
   document.querySelectorAll(".rail-btn[data-view]").forEach((btn) => {
-    btn.addEventListener("click", () => setView(btn.dataset.view));
+    btn.addEventListener("click", () => {
+      setMobilePane(false);
+      setView(btn.dataset.view);
+    });
   });
 
   $("add-server-btn") && $("add-server-btn").addEventListener("click", () => openServerModal());
