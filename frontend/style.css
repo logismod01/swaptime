@@ -128,6 +128,18 @@ button {
     letter-spacing: 0.5px;
 }
 
+.auth-notice {
+    display: none;
+    padding: 11px 13px;
+    margin-bottom: 16px;
+    background: rgba(255, 143, 0, 0.08);
+    border-left: 3px solid var(--amber);
+    border-radius: 8px;
+    color: #ffcc80;
+    font-size: 12.5px;
+    line-height: 1.45;
+}
+
 .auth-tabs {
     display: flex;
     gap: 5px;

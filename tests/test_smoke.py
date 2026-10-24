@@ -109,6 +109,11 @@ async def scenario(base: str, ws_url: str):
         r = register(c, "alice")
         assert r.status_code == 200, r.text
         alice = r.json()
+        # cookie-аутентификация: токен не передаём, браузер шлёт cookie
+        assert c.get("/api/me").status_code == 200, "cookie-авторизация не работает"
+        # токен в query — запасной вариант, если прокси срезал Authorization
+        assert c.get(f"/api/me?token={alice['token']}").status_code == 200
+
         r = register(c, "bob")
         assert r.status_code == 200, r.text
         bob = r.json()
@@ -121,7 +126,11 @@ async def scenario(base: str, ws_url: str):
         assert bad.status_code == 400
 
         # ---------- авторизация ----------
-        assert c.get("/api/me").status_code == 401
+        anon = httpx.Client(base_url=base, timeout=10)
+        assert anon.get("/api/me").status_code == 401
+        assert anon.get("/api/me", headers=auth("nope")).status_code == 401
+        anon.close()
+        # битый заголовок не должен «проваливаться» в cookie
         assert c.get("/api/me", headers=auth("nope")).status_code == 401
         me = c.get("/api/me", headers=auth(alice["token"])).json()
         assert me["user"]["username"] == "alice"
@@ -132,8 +141,10 @@ async def scenario(base: str, ws_url: str):
         assert r.status_code == 403, r.text
 
         # профиль без токена менять нельзя
-        r = c.post("/api/update_profile", json={"display_name": "hack"})
+        anon = httpx.Client(base_url=base, timeout=10)
+        r = anon.post("/api/update_profile", json={"display_name": "hack"})
         assert r.status_code == 401
+        anon.close()
 
         # ---------- друзья ----------
         r = c.post("/api/friends/request", json={"to_user": "bob"}, headers=auth(alice["token"]))
@@ -264,6 +275,17 @@ async def scenario(base: str, ws_url: str):
                 "display_name": "Алиса", "avatar_color": "javascript:alert(1)", "font_family": "Poppins, sans-serif",
             }, headers=auth(alice["token"]))
             assert r.json()["user"]["avatar_color"] == "#e53935"
+
+        # ---------- выход по cookie ----------
+        c2 = httpx.Client(base_url=base, timeout=10)
+        r = c2.post("/api/register", json={
+            "username": "dave", "password": "pass1234", "display_name": "Dave", "email": "dave@mail.ru",
+        })
+        assert r.status_code == 200, r.text
+        assert c2.get("/api/me").status_code == 200
+        assert c2.post("/api/logout").status_code == 200
+        assert c2.get("/api/me").status_code == 401, "после выхода cookie должна перестать работать"
+        c2.close()
 
     print("✅ Все проверки прошли")
 

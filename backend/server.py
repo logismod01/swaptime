@@ -29,16 +29,20 @@ from fastapi import (
     HTTPException,
     Header,
     Query,
+    Cookie,
     Depends,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = Path(os.environ.get("SWAPTIME_DB", BASE_DIR / "data" / "swaptime.db"))
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+SESSION_COOKIE = "swaptime_session"
+SESSION_TTL = 60 * 60 * 24 * 365  # год
 
 MAX_MESSAGE_LEN = 4000
 HISTORY_LIMIT = 200
@@ -268,15 +272,39 @@ def session_username(token: str) -> Optional[str]:
 def auth_user(
     authorization: Optional[str] = Header(default=None),
     token: Optional[str] = Query(default=None),
+    swaptime_session: Optional[str] = Cookie(default=None),
 ) -> str:
-    """FastAPI-зависимость: достаёт пользователя по Bearer-токену."""
-    raw = token
-    if authorization and authorization.lower().startswith("bearer "):
-        raw = authorization[7:].strip()
+    """Достаёт пользователя по токену: Authorization → ?token= → cookie.
+
+    Три способа нужны, потому что некоторые прокси срезают заголовок
+    Authorization: тогда браузер автоматически пришлёт cookie, а фронтенд
+    в крайнем случае повторит запрос с токеном в query.
+    """
+    raw = None
+    if authorization:
+        # если заголовок пришёл, но битый — не подставляем cookie,
+        # иначе ошибка клиента маскируется валидной cookie
+        if authorization.lower().startswith("bearer "):
+            raw = authorization[7:].strip()
+    elif token:
+        raw = token
+    if not raw:
+        raw = swaptime_session
     username = session_username(raw) if raw else None
     if not username:
         raise HTTPException(401, "Сессия истекла — войди заново")
     return username
+
+
+def set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=SESSION_TTL,
+        httponly=True,
+        samesite="lax",
+        path="/",
+    )
 
 
 # ============================================
@@ -510,7 +538,7 @@ active_connections: Dict[str, Set[WebSocket]] = {}
 # API — РЕГИСТРАЦИЯ / ВХОД
 # ============================================
 @app.post("/api/register")
-async def register(data: RegisterData):
+async def register(data: RegisterData, response: Response):
     username = data.username.strip().lower()
     email = (data.email or "").strip().lower()
     display_name = (data.display_name or "").strip()[:40]
@@ -541,11 +569,12 @@ async def register(data: RegisterData):
     conn.close()
 
     token = create_session(username)
+    set_session_cookie(response, token)
     return {"ok": True, "token": token, "user": get_user(username)}
 
 
 @app.post("/api/login")
-async def login(data: LoginData):
+async def login(data: LoginData, response: Response):
     username = data.username.strip().lower()
 
     conn = db_connect()
@@ -566,17 +595,27 @@ async def login(data: LoginData):
     conn.close()
 
     token = create_session(username)
+    set_session_cookie(response, token)
     return {"ok": True, "token": token, "user": get_user(username)}
 
 
 @app.post("/api/logout")
-async def logout(authorization: Optional[str] = Header(default=None)):
+async def logout(
+    response: Response,
+    authorization: Optional[str] = Header(default=None),
+    swaptime_session: Optional[str] = Cookie(default=None),
+):
+    token = None
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
+    if not token:
+        token = swaptime_session
+    if token:
         conn = db_connect()
         conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
         conn.commit()
         conn.close()
+    response.delete_cookie(SESSION_COOKIE, path="/")
     return {"ok": True}
 
 
@@ -1261,7 +1300,11 @@ FRONTEND_PATH = BASE_DIR / "frontend"
 
 @app.get("/")
 async def root():
-    return FileResponse(FRONTEND_PATH / "index.html")
+    # index.html не кешируем, иначе после обновления остаётся старый script.js
+    return FileResponse(
+        FRONTEND_PATH / "index.html",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 @app.get("/style.css")

@@ -38,6 +38,8 @@ const FONT_LABELS = {
 
 const state = {
   token: localStorage.getItem("swaptime_token") || null,
+  // "header" — обычный Bearer; "query" — если прокси срезал заголовок
+  tokenMode: localStorage.getItem("swaptime_token_mode") === "query" ? "query" : "header",
   user: null,
   chats: [],
   friends: [],
@@ -141,15 +143,37 @@ class ApiError extends Error {
   }
 }
 
+function withTokenInUrl(path) {
+  if (!state.token) return path;
+  const sep = path.includes("?") ? "&" : "?";
+  return path + sep + "token=" + encodeURIComponent(state.token);
+}
+
+function rememberQueryTokenMode() {
+  if (state.tokenMode === "query") return;
+  state.tokenMode = "query";
+  try {
+    localStorage.setItem("swaptime_token_mode", "query");
+  } catch (err) {}
+}
+
 async function api(path, options = {}) {
-  const { method = "GET", body, auth = true } = options;
+  const {
+    method = "GET",
+    body,
+    auth = true,
+    retryOn401 = true,
+    forceQuery = false,
+  } = options;
+
+  const useQuery = auth && !!state.token && (forceQuery || state.tokenMode === "query");
   const headers = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  if (auth && state.token) headers["Authorization"] = "Bearer " + state.token;
+  if (auth && state.token && !useQuery) headers["Authorization"] = "Bearer " + state.token;
 
   let resp;
   try {
-    resp = await fetch(path, {
+    resp = await fetch(useQuery ? withTokenInUrl(path) : path, {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -169,18 +193,57 @@ async function api(path, options = {}) {
   }
 
   if (!resp.ok) {
-    if (resp.status === 401 && auth) handleSessionExpired();
+    if (resp.status === 401 && auth && state.token) {
+      // 401 бывает двух видов: реально истёкшая сессия или прокси,
+      // который срезал заголовок Authorization. Пробуем второй вариант.
+      if (retryOn401 && !useQuery) {
+        const result = await api(path, { ...options, retryOn401: false, forceQuery: true });
+        rememberQueryTokenMode();
+        return result;
+      }
+      handleSessionExpired();
+    }
     const detail = data && (data.detail || data.message);
     throw new ApiError(typeof detail === "string" ? detail : "Ошибка сервера", resp.status);
   }
   return data;
 }
 
+function showAuthNotice(text) {
+  const notice = $("auth-notice");
+  if (!notice) return;
+  notice.textContent = text;
+  notice.style.display = "block";
+}
+
+function hideAuthNotice() {
+  const notice = $("auth-notice");
+  if (notice) notice.style.display = "none";
+}
+
 function handleSessionExpired() {
   if (!state.token) return;
-  toast("Сессия истекла, войди заново", "error");
+
+  const lastUser =
+    (state.user && state.user.username) ||
+    localStorage.getItem("swaptime_last_user") ||
+    "";
+  if (lastUser) {
+    try {
+      localStorage.setItem("swaptime_last_user", lastUser);
+    } catch (err) {}
+  }
+
   clearSession();
   showScreen("auth");
+  hideAuthNotice();
+  showAuthNotice(
+    "Сессия истекла — войди заново тем же ником и паролем. Все друзья и сообщения на месте."
+  );
+  if (lastUser) {
+    $("login-username").value = lastUser;
+    setTimeout(() => $("login-password").focus(), 100);
+  }
 }
 
 function clearSession() {
@@ -328,6 +391,10 @@ function finishAuth(data) {
   localStorage.setItem("swaptime_user", JSON.stringify(data.user));
   $("login-error").textContent = "";
   $("register-error").textContent = "";
+  hideAuthNotice();
+  try {
+    localStorage.setItem("swaptime_last_user", data.user.username);
+  } catch (err) {}
   enterApp();
 }
 
@@ -1616,6 +1683,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   bindEvents();
   generateCaptcha();
   applyFont(FALLBACK_FONTS[0]);
+
+  // подсказываем ник, которым заходили в прошлый раз
+  const lastName = localStorage.getItem("swaptime_last_user");
+  if (lastName) $("login-username").value = lastName;
 
   if (!state.token) {
     showScreen("auth");
