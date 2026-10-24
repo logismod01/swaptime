@@ -1,185 +1,754 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="ru" data-theme="midnight">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>СвапТайм — Мессенджер</title>
-    <link rel="stylesheet" href="/static/style.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+
+    <!-- 10 шрифтов для настроек -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Roboto:wght@400;500;700&family=Montserrat:wght@400;600;700&family=Open+Sans:wght@400;600;700&family=Lato:wght@400;700&family=Poppins:wght@400;600;700&family=Raleway:wght@400;600;700&family=Nunito:wght@400;600;700;800&family=Merriweather:wght@400;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+
+    <link rel="stylesheet" href="/static/style.css?v=10">
 </head>
 <body>
 
-    <!-- ЭКРАН ЛОГИНА -->
+    <!-- ============================================
+         ЭКРАН ВХОДА / РЕГИСТРАЦИИ
+         ============================================ -->
     <div id="auth-screen" class="screen active">
+        <div class="auth-bg-glow"></div>
         <div class="auth-box">
             <div class="logo">
                 <span class="logo-icon">S</span>
                 <h1>СвапТайм</h1>
+                <p class="logo-subtitle">Общайся. Звони. Создавай.</p>
             </div>
+
+            <div id="auth-notice" class="auth-notice" style="display:none;"></div>
+
             <div class="auth-tabs">
                 <button class="auth-tab active" data-tab="login">Вход</button>
                 <button class="auth-tab" data-tab="register">Регистрация</button>
             </div>
-            <div id="login-form" class="auth-form active">
-                <input type="text" id="login-username" placeholder="Ник" autocomplete="off">
-                <input type="password" id="login-password" placeholder="Пароль">
-                <button class="btn-primary" onclick="doLogin()">Войти</button>
+
+            <form id="login-form" class="auth-form active" autocomplete="off" novalidate>
+                <label class="field">
+                    <span class="field-label">Ник</span>
+                    <input type="text" id="login-username" placeholder="например, logismod" autocomplete="username">
+                </label>
+                <label class="field">
+                    <span class="field-label">Пароль</span>
+                    <input type="password" id="login-password" placeholder="••••••••" autocomplete="current-password">
+                </label>
+                <button class="btn-primary" type="submit" id="login-submit">Войти</button>
                 <div id="login-error" class="error"></div>
-            </div>
-            <div id="register-form" class="auth-form">
-                <input type="text" id="reg-username" placeholder="Ник (мин. 3 символа)" autocomplete="off">
-                <input type="text" id="reg-display-name" placeholder="Отображаемое имя" autocomplete="off">
-                <input type="email" id="reg-email" placeholder="Email" autocomplete="off">
-                <input type="password" id="reg-password" placeholder="Пароль (мин. 4 символа)">
-                <input type="password" id="reg-password-2" placeholder="Повтори пароль">
+            </form>
+
+            <form id="register-form" class="auth-form" autocomplete="off" novalidate>
+                <label class="field">
+                    <span class="field-label">Ник <em>3–20 символов, латиница</em></span>
+                    <input type="text" id="reg-username" placeholder="например, logismod" autocomplete="username">
+                </label>
+                <label class="field">
+                    <span class="field-label">Отображаемое имя</span>
+                    <input type="text" id="reg-display-name" placeholder="Как тебя звать?" autocomplete="nickname">
+                </label>
+                <label class="field">
+                    <span class="field-label">Email</span>
+                    <input type="email" id="reg-email" placeholder="you@mail.ru" autocomplete="email">
+                </label>
+                <label class="field">
+                    <span class="field-label">Пароль <em>минимум 4 символа</em></span>
+                    <input type="password" id="reg-password" placeholder="••••••••" autocomplete="new-password">
+                </label>
+                <label class="field">
+                    <span class="field-label">Повтори пароль</span>
+                    <input type="password" id="reg-password-2" placeholder="••••••••" autocomplete="new-password">
+                </label>
+
                 <div class="captcha-block">
                     <div class="captcha-question" id="captcha-question">Загрузка...</div>
                     <div class="captcha-options" id="captcha-options"></div>
                 </div>
-                <button class="btn-primary" onclick="doRegister()">Создать аккаунт</button>
+
+                <button class="btn-primary" type="submit" id="register-submit">Создать аккаунт</button>
                 <div id="register-error" class="error"></div>
-            </div>
+            </form>
         </div>
     </div>
 
-    <!-- ЭКРАН ЧАТА -->
+    <!-- ============================================
+         ОСНОВНОЕ ПРИЛОЖЕНИЕ
+         ============================================ -->
     <div id="chat-screen" class="screen">
-        <div class="chat-layout">
-            <aside class="sidebar">
-                <div class="sidebar-header">
-                    <div class="user-info">
-                        <div class="avatar" id="my-avatar">?</div>
-                        <div>
-                            <div class="user-name" id="my-name">—</div>
-                            <div class="user-status">В сети</div>
-                        </div>
-                    </div>
-                    <div style="display:flex; gap:5px;">
-                        <button class="icon-btn" onclick="openSettings()" title="Настройки">⚙</button>
-                        <button class="icon-btn" onclick="logout()" title="Выйти">⏻</button>
-                    </div>
+        <div class="app">
+
+            <!-- РЕЙЛ -->
+            <nav class="rail">
+                <div class="rail-top">
+                    <button class="rail-btn active" data-view="chats" title="Личные сообщения">
+                        <span class="rail-emoji">💬</span>
+                        <span class="rail-badge" id="rail-unread" hidden></span>
+                    </button>
+                    <button class="rail-btn" data-view="friends" title="Друзья">
+                        <span class="rail-emoji">👥</span>
+                        <span class="rail-badge" id="rail-requests" hidden></span>
+                    </button>
+                    <button class="rail-btn" data-view="tg" title="Каналы">
+                        <span class="rail-emoji">📣</span>
+                        <span class="rail-badge" id="rail-tg" hidden></span>
+                    </button>
+
+                    <div class="rail-sep"></div>
+
+                    <div class="rail-servers" id="server-list"></div>
+                    <button class="rail-btn rail-add" id="add-server-btn" title="Создать сервер">＋</button>
                 </div>
+
+                <div class="rail-bottom">
+                    <button class="rail-btn rail-small" data-action="open-settings" title="Настройки" aria-label="Настройки">⚙</button>
+                    <button class="rail-btn rail-small" data-action="logout" title="Выйти" aria-label="Выйти">⏻</button>
+                </div>
+            </nav>
+
+            <!-- САЙДБАР: ЛИЧНЫЕ / ДРУЗЬЯ / КАНАЛЫ -->
+            <aside class="sidebar" id="home-sidebar">
+                <header class="sidebar-head">
+                    <span class="sidebar-title" id="sidebar-title">Личные сообщения</span>
+                    <span class="sidebar-tag" id="sidebar-tag">DM</span>
+                </header>
+
                 <div class="sidebar-search">
-                    <input type="text" id="search-users" placeholder="Поиск друзей...">
-                    <button class="add-friend-btn" onclick="openAddFriend()">➕ Добавить друга</button>
+                    <input type="text" id="search-users" placeholder="Поиск по друзьям…" autocomplete="off">
                 </div>
-                <div id="requests-block" class="requests-block" style="display:none;">
-                    <div class="requests-title">📩 Запросы в друзья</div>
-                    <div id="requests-list"></div>
+
+                <div class="sidebar-scroll">
+                    <!-- ЛИЧНЫЕ -->
+                    <div id="chats-view">
+                        <div id="requests-block" class="requests-block" style="display:none;">
+                            <div class="requests-title">📩 Запросы в друзья</div>
+                            <div id="requests-list"></div>
+                        </div>
+                        <div class="dm-list" id="users-list">
+                            <div class="loading-small">Загрузка…</div>
+                        </div>
+                        <button class="add-friend-btn" data-action="add-friend">＋ Добавить друга</button>
+                    </div>
+
+                    <!-- ДРУЗЬЯ -->
+                    <div id="friends-view" style="display:none;">
+                        <div class="friends-tabs" id="friends-tabs">
+                            <button class="ftab active" data-tab="all">Все</button>
+                            <button class="ftab" data-tab="online">Онлайн</button>
+                            <button class="ftab" data-tab="pending">Заявки</button>
+                            <button class="ftab" data-tab="blocked">Блок</button>
+                        </div>
+                        <div class="friends-list" id="friends-list"></div>
+                        <button class="add-friend-btn" data-action="add-friend">＋ Добавить друга</button>
+                    </div>
+
+                    <!-- КАНАЛЫ -->
+                    <div id="tg-sidebar" style="display:none;">
+                        <div class="tg-sidebar-actions">
+                            <button class="tg-new-btn" data-action="create-channel">＋ Создать канал</button>
+                            <button class="tg-new-btn ghost" data-action="discover-channels">🔍 Найти</button>
+                        </div>
+                        <div class="tg-list" id="tg-list"></div>
+                    </div>
                 </div>
-                <div class="users-list" id="users-list">
-                    <div class="loading-small">Загрузка...</div>
+
+                <!-- МОЯ ПАНЕЛЬ (переезжает в серверный сайдбар) -->
+                <footer class="me-bar" id="me-bar">
+                    <button class="me-profile" data-action="my-profile" title="Мой профиль">
+                        <span class="av-slot" id="me-avatar-slot"></span>
+                        <span class="me-text">
+                            <span class="me-name" id="my-name">—</span>
+                            <span class="me-tag" id="my-tag">@—</span>
+                        </span>
+                    </button>
+                    <div class="me-actions">
+                        <button class="icon-btn" data-action="open-settings" title="Настройки">⚙</button>
+                        <button class="icon-btn" data-action="logout" title="Выйти">⏻</button>
+                    </div>
+                </footer>
+            </aside>
+
+            <!-- САЙДБАР: КАНАЛЫ СЕРВЕРА -->
+            <aside class="sidebar server-sidebar" id="server-sidebar" style="display:none;">
+                <header class="server-head" id="server-head">
+                    <button class="server-head-btn" data-action="server-menu">
+                        <span class="server-head-text" id="server-head-name">Сервер</span>
+                        <span class="server-head-caret">⌄</span>
+                    </button>
+                </header>
+
+                <div class="server-scroll">
+                    <div class="server-channels">
+                        <div class="channels-label">
+                            <span>Текстовые каналы</span>
+                            <button class="channels-add" data-action="create-server-channel" title="Создать канал">＋</button>
+                        </div>
+                        <div id="server-channels-list"></div>
+                    </div>
+
+                    <div class="server-voice">
+                        <div class="channels-label"><span>Голосовой канал</span></div>
+                        <button class="voice-channel" data-action="start-call-from-server" id="voice-channel-btn">
+                            <span class="voice-icon">🔊</span>
+                            <span id="voice-channel-name">общий голосовой</span>
+                        </button>
+                        <div class="voice-hint">Позвони участнику сервера из списка справа.</div>
+                    </div>
                 </div>
             </aside>
+
+            <!-- ОСНОВНАЯ ОБЛАСТЬ -->
             <main class="chat-area">
-                <div id="no-chat" class="no-chat">
-                    <div class="no-chat-icon">💬</div>
-                    <h2>Выбери, с кем поговорить</h2>
-                    <p>Слева — список друзей</p>
+
+                <!-- ЛИЧНЫЕ СООБЩЕНИЯ -->
+                <div id="home-chat" class="view-pane">
+                    <div id="no-chat" class="no-chat">
+                        <div class="no-chat-art">💬</div>
+                        <h2>Тут пока пусто</h2>
+                        <p>Выбери друга слева, заведи канал или создай свой сервер.</p>
+                        <div class="no-chat-actions">
+                            <button class="btn-ghost" data-action="add-friend">＋ Добавить друга</button>
+                            <button class="btn-ghost" data-action="create-server">🏰 Создать сервер</button>
+                        </div>
+                    </div>
+
+                    <div id="chat-active" class="chat-active" style="display:none;">
+                        <header class="chat-header">
+                            <button class="icon-btn back-btn" data-action="close-chat" title="Назад" aria-label="Назад">←</button>
+                            <button class="chat-peer" data-action="chat-profile" title="Профиль">
+                                <span class="av-slot" id="chat-avatar-slot"></span>
+                                <span class="chat-peer-text">
+                                    <span class="chat-name" id="chat-name">—</span>
+                                    <span class="chat-status" id="chat-status">—</span>
+                                </span>
+                            </button>
+                            <div class="chat-header-actions">
+                                <button class="icon-btn call-btn" data-action="start-audio-call" title="Аудиозвонок">📞</button>
+                                <button class="icon-btn call-btn" data-action="start-video-call" title="Видеозвонок">🎥</button>
+                                <button class="icon-btn" data-action="chat-profile" title="Профиль">👤</button>
+                            </div>
+                        </header>
+
+                        <div class="pinned-bar" id="pinned-bar" style="display:none;">
+                            <button class="pinned-preview" data-action="toggle-pins" title="Закреплённые сообщения">
+                                <span class="pinned-icon">📌</span>
+                                <span class="pinned-text" id="pinned-text">Закреплённое сообщение</span>
+                                <span class="pinned-count" id="pinned-count">1</span>
+                            </button>
+                        </div>
+                        <div class="pins-popover" id="pins-popover"></div>
+
+                        <div class="messages" id="messages"></div>
+
+                        <div class="typing-line" id="typing-line" style="display:none;">печатает…</div>
+
+                        <div id="reply-box" class="composer-banner" style="display:none;">
+                            <div class="composer-banner-body">
+                                <div class="composer-banner-title">Ответ <span id="reply-author"></span></div>
+                                <div class="composer-banner-text" id="reply-text"></div>
+                            </div>
+                            <button class="banner-close" data-action="cancel-reply" aria-label="Отменить">✕</button>
+                        </div>
+
+                        <div id="edit-box" class="composer-banner edit" style="display:none;">
+                            <div class="composer-banner-body">
+                                <div class="composer-banner-title">✏️ Редактирование</div>
+                                <div class="composer-banner-text" id="edit-text"></div>
+                            </div>
+                            <button class="banner-close" data-action="cancel-edit" aria-label="Отменить">✕</button>
+                        </div>
+
+                        <footer class="chat-input">
+                            <button class="composer-plus" data-action="open-settings" title="Настройки">＋</button>
+                            <input type="text" id="message-input" placeholder="Написать в @…" autocomplete="off" maxlength="4000">
+                            <button class="send-btn" id="send-btn" aria-label="Отправить">➤</button>
+                        </footer>
+                    </div>
                 </div>
-                <div id="chat-active" class="chat-active" style="display: none;">
-                    <header class="chat-header">
-                        <div class="avatar" id="chat-avatar">?</div>
-                        <div>
-                            <div class="chat-name" id="chat-name">—</div>
-                            <div class="chat-status" id="chat-status">—</div>
+
+                <!-- КАНАЛ (TELEGRAM) -->
+                <div id="tg-view" class="view-pane" style="display:none;">
+                    <header class="chat-header tg-header">
+                        <button class="icon-btn back-btn" data-action="close-tg" title="Назад">←</button>
+                        <div class="tg-avatar" id="tg-avatar">📣</div>
+                        <div class="chat-header-info">
+                            <div class="chat-name" id="tg-name">Канал</div>
+                            <div class="chat-status" id="tg-subscribers">0 подписчиков</div>
+                        </div>
+                        <div class="chat-header-actions">
+                            <button class="icon-btn" id="tg-subscribe-btn" data-action="tg-subscribe" title="Подписаться">＋</button>
+                            <button class="icon-btn" id="tg-settings-btn" data-action="tg-settings" title="Настройки канала">⚙</button>
                         </div>
                     </header>
-                    <div class="messages" id="messages"></div>
-                    <!-- Окно ответа -->
-                    <div id="reply-box" style="display:none; padding:10px 20px; background:var(--bg-2); border-top:1px solid var(--border); font-size:13px; color:var(--text-dim); display:flex; justify-content:space-between; align-items:center;">
-                        <span id="reply-text"></span>
-                        <button onclick="cancelReply()" style="background:none; border:none; color:var(--red); cursor:pointer; font-size:16px;">✕</button>
+                    <div class="tg-feed" id="tg-feed"></div>
+                    <div class="tg-composer" id="tg-composer" style="display:none;">
+                        <textarea id="tg-post-input" placeholder="Новый пост в канал…" maxlength="4000"></textarea>
+                        <button class="btn-primary" data-action="publish-post">Опубликовать</button>
                     </div>
+                </div>
+
+                <!-- СЕРВЕР -->
+                <div id="server-view" class="view-pane" style="display:none;">
+                    <header class="chat-header server-chat-header">
+                        <button class="icon-btn back-btn" data-action="close-server-chat" title="Назад">←</button>
+                        <span class="channel-hash">#</span>
+                        <div class="chat-header-info">
+                            <div class="chat-name" id="server-channel-name">канал</div>
+                            <div class="chat-status" id="server-channel-topic">—</div>
+                        </div>
+                        <div class="chat-header-actions">
+                            <button class="icon-btn" data-action="toggle-members" title="Участники">👥</button>
+                            <button class="icon-btn" data-action="server-menu" title="Меню сервера">☰</button>
+                        </div>
+                    </header>
+
+                    <div class="pinned-bar" id="server-pinned-bar" style="display:none;">
+                        <button class="pinned-preview" data-action="toggle-server-pins" title="Закреплённые сообщения канала">
+                            <span class="pinned-icon">📌</span>
+                            <span class="pinned-text" id="server-pinned-text">Закреплённое сообщение</span>
+                            <span class="pinned-count" id="server-pinned-count">1</span>
+                        </button>
+                    </div>
+                    <div class="pins-popover" id="server-pins-popover"></div>
+
+                    <div class="messages" id="server-messages"></div>
+                    <div class="typing-line" id="server-typing" style="display:none;">печатает…</div>
+
                     <footer class="chat-input">
-                        <input type="text" id="message-input" placeholder="Напиши сообщение..." autocomplete="off">
-                        <button class="send-btn" onclick="sendMessage()">➤</button>
+                        <button class="composer-plus" data-action="server-menu" title="Меню">＋</button>
+                        <input type="text" id="server-input" placeholder="Написать в #канал" autocomplete="off" maxlength="4000">
+                        <button class="send-btn" id="server-send-btn" aria-label="Отправить">➤</button>
                     </footer>
                 </div>
             </main>
+
+            <!-- УЧАСТНИКИ СЕРВЕРА -->
+            <aside class="members-panel" id="members-panel" style="display:none;">
+                <div class="members-head">Участники — <span id="members-count">0</span></div>
+                <div class="members-list" id="members-list"></div>
+            </aside>
         </div>
     </div>
 
-    <!-- МОДАЛКА: ДОБАВИТЬ ДРУГА -->
+    <!-- ============================================
+         МОДАЛКА: ДОБАВИТЬ ДРУГА
+         ============================================ -->
     <div id="add-friend-modal" class="modal-overlay">
         <div class="modal-box">
             <h3>➕ Добавить друга</h3>
-            <input type="text" id="friend-username" placeholder="Введи ник друга" autocomplete="off">
+            <p class="modal-hint">Введи ник — человек получит заявку.</p>
+            <input type="text" id="friend-username" placeholder="ник друга" autocomplete="off">
             <div class="modal-actions">
-                <button class="modal-btn secondary" onclick="closeAddFriend()">Отмена</button>
-                <button class="modal-btn primary" onclick="sendFriendRequest()">Отправить</button>
+                <button class="modal-btn secondary" data-action="close-add-friend">Отмена</button>
+                <button class="modal-btn primary" data-action="send-friend-request">Отправить</button>
             </div>
             <div class="modal-error" id="friend-error"></div>
         </div>
     </div>
 
-    <!-- МОДАЛКА: ПРОФИЛЬ -->
+    <!-- ============================================
+         МОДАЛКА: КАРТОЧКА ПРОФИЛЯ
+         ============================================ -->
     <div id="profile-modal" class="modal-overlay">
-        <div class="modal-box">
-            <h3 id="profile-title">Профиль</h3>
-            <div class="profile-info">
-                <div class="avatar" id="profile-avatar" style="width:60px;height:60px;font-size:24px;margin:0 auto 15px;">?</div>
+        <div class="profile-card" id="profile-card">
+            <div class="profile-banner banner-crimson" id="profile-banner">
+                <button class="profile-close" data-action="close-profile" aria-label="Закрыть">✕</button>
+            </div>
+            <div class="profile-body">
+                <div class="profile-avatar-row">
+                    <span class="av-slot av-slot-xl" id="profile-avatar-slot"></span>
+                    <span class="profile-status" id="profile-status"></span>
+                </div>
                 <div class="profile-name" id="profile-name">—</div>
                 <div class="profile-username" id="profile-username">@—</div>
+
+                <div class="profile-section">
+                    <div class="profile-section-title">О себе</div>
+                    <div class="profile-bio" id="profile-bio">—</div>
+                </div>
+
+                <div class="profile-section">
+                    <div class="profile-section-title">В СвапТайме с</div>
+                    <div class="profile-meta" id="profile-since">—</div>
+                </div>
+
+                <div class="profile-actions">
+                    <button class="profile-btn write" id="profile-write-btn" data-action="write-to-user">💬 Написать</button>
+                    <button class="profile-btn call" id="profile-call-btn" data-action="call-from-profile">📞 Позвонить</button>
+                    <button class="profile-btn ignore" id="profile-ignore-btn" data-action="toggle-ignore">🔇 Игнорировать</button>
+                    <button class="profile-btn block" id="profile-block-btn" data-action="toggle-block">🚫 Заблокировать</button>
+                    <button class="profile-btn remove" id="profile-remove-btn" data-action="remove-friend">🗑 Удалить из друзей</button>
+                </div>
+                <div class="modal-error" id="profile-error"></div>
             </div>
-            <div class="profile-actions">
-                <button class="profile-btn write" onclick="writeToUser()">💬 Написать</button>
-                <button class="profile-btn block" onclick="blockCurrentUser()">🚫 Заблокировать</button>
-                <button class="profile-btn ignore" onclick="ignoreCurrentUser()">🔇 Игнорировать</button>
-                <button class="profile-btn remove" onclick="removeCurrentFriend()">🗑 Удалить из друзей</button>
-            </div>
-            <div class="modal-actions" style="margin-top:15px;">
-                <button class="modal-btn secondary" onclick="closeProfile()">Закрыть</button>
-            </div>
-            <div class="modal-error" id="profile-error"></div>
         </div>
     </div>
 
-    <!-- МОДАЛКА: НАСТРОЙКИ -->
+    <!-- ============================================
+         МОДАЛКА: НАСТРОЙКИ
+         ============================================ -->
     <div id="settings-modal" class="modal-overlay">
-        <div class="modal-box" style="max-height:90vh; overflow-y:auto;">
-            <h3>⚙ Настройки</h3>
-            
-            <div class="settings-section">
-                <div class="settings-label">Отображаемое имя</div>
-                <input type="text" id="settings-name" placeholder="Имя" style="width:100%; padding:12px; background:var(--bg); border:2px solid var(--border); border-radius:10px; color:var(--text); outline:none;">
-            </div>
+        <div class="settings-shell">
+            <nav class="settings-nav">
+                <div class="settings-nav-title">Настройки</div>
+                <button class="settings-tab active" data-tab="profile">👤 Мой профиль</button>
+                <button class="settings-tab" data-tab="appearance">🎨 Внешний вид</button>
+                <button class="settings-tab" data-tab="calls">📞 Звонки</button>
+                <button class="settings-tab" data-tab="privacy">🛡 Приватность</button>
+                <div class="settings-nav-foot">
+                    <button class="modal-btn secondary" data-action="close-settings">Закрыть (Esc)</button>
+                </div>
+            </nav>
 
-            <div class="settings-section">
-                <div class="settings-label">Цвет аватарки</div>
-                <input type="color" id="settings-color" style="width:100%; height:50px; border:none; border-radius:10px; cursor:pointer; background:var(--bg);">
-            </div>
+            <div class="settings-body">
+                <!-- ПРОФИЛЬ -->
+                <section class="settings-pane active" id="settings-tab-profile">
+                    <div class="settings-banner banner-crimson" id="settings-banner">
+                        <span class="av-slot av-slot-xl" id="settings-avatar-slot"></span>
+                    </div>
 
-            <div class="settings-section">
-                <div class="settings-label">Шрифт</div>
-                <select id="settings-font" style="width:100%; padding:12px; background:var(--bg); border:2px solid var(--border); border-radius:10px; color:var(--text); outline:none;">
-                    <option value="Inter, sans-serif">Inter (По умолчанию)</option>
-                    <option value="Arial, sans-serif">Arial</option>
-                    <option value="'Roboto', sans-serif">Roboto</option>
-                    <option value="'Courier New', monospace">Courier New</option>
-                    <option value="'Times New Roman', serif">Times New Roman</option>
-                    <option value="'Comic Sans MS', cursive">Comic Sans</option>
-                </select>
-            </div>
+                    <div class="settings-row">
+                        <div class="settings-col">
+                            <div class="settings-label">Аватарка</div>
+                            <div class="settings-hint">Картинка обрежется по центру до квадрата.</div>
+                            <div class="avatar-controls">
+                                <button class="modal-btn primary" data-action="pick-avatar">Загрузить фото</button>
+                                <button class="modal-btn secondary" data-action="remove-avatar">Удалить</button>
+                                <input type="file" id="avatar-input" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+                            </div>
+                            <div class="modal-error" id="avatar-error"></div>
+                        </div>
+                    </div>
 
-            <div class="modal-actions" style="margin-bottom:20px;">
-                <button class="modal-btn secondary" onclick="closeSettings()">Отмена</button>
-                <button class="modal-btn primary" onclick="saveSettings()">Сохранить</button>
-            </div>
+                    <div class="settings-section">
+                        <div class="settings-label">Рамка аватарки</div>
+                        <div class="frames-grid" id="frames-grid"></div>
+                    </div>
 
-            <div class="settings-divider"></div>
+                    <div class="settings-section">
+                        <div class="settings-label">Баннер профиля</div>
+                        <div class="banners-grid" id="banners-grid"></div>
+                    </div>
 
-            <div class="settings-section">
-                <div class="settings-label">🚫 Заблокированные</div>
-                <div id="blocked-list"></div>
-            </div>
+                    <div class="settings-section">
+                        <div class="settings-label">Отображаемое имя</div>
+                        <input type="text" id="settings-name" placeholder="Имя" maxlength="40">
+                    </div>
 
-            <div class="settings-section">
-                <div class="settings-label">🔇 Игнорируемые</div>
-                <div id="ignored-list"></div>
+                    <div class="settings-section">
+                        <div class="settings-label">О себе</div>
+                        <textarea id="settings-bio" class="settings-textarea" maxlength="190"
+                                  placeholder="Пара слов о себе…"></textarea>
+                        <div class="settings-hint"><span id="bio-counter">0</span>/190</div>
+                    </div>
+
+                    <div class="settings-section">
+                        <div class="settings-label">Цвет аватарки <em>если нет фото</em></div>
+                        <div class="color-row">
+                            <input type="color" id="settings-color">
+                            <div class="color-presets" id="color-presets"></div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ВНЕШНИЙ ВИД -->
+                <section class="settings-pane" id="settings-tab-appearance">
+                    <div class="settings-section">
+                        <div class="settings-label">Тема <em>10 градиентов</em></div>
+                        <div class="themes-grid" id="theme-grid"></div>
+                    </div>
+                    <div class="settings-section">
+                        <div class="settings-label">Шрифт интерфейса</div>
+                        <select id="settings-font"></select>
+                        <div class="font-preview" id="font-preview">Пример текста — СвапТайм 123</div>
+                    </div>
+                    <div class="settings-section">
+                        <div class="settings-label">Предпросмотр сообщений</div>
+                        <div class="preview-chat" id="font-preview-chat"></div>
+                    </div>
+                </section>
+
+                <!-- ЗВОНКИ -->
+                <section class="settings-pane" id="settings-tab-calls">
+                    <div class="settings-section">
+                        <div class="settings-label">Качество видео по умолчанию</div>
+                        <select id="call-quality">
+                            <option value="480p">480p — экономия трафика</option>
+                            <option value="720p">720p — обычное</option>
+                            <option value="1080p" selected>1080p — хорошее</option>
+                            <option value="1440p">1440p — высокое</option>
+                            <option value="2160p">4K (2160p) — максимальное</option>
+                        </select>
+                    </div>
+                    <div class="settings-section">
+                        <div class="settings-label">Частота кадров</div>
+                        <select id="call-fps">
+                            <option value="15">15 fps</option>
+                            <option value="24">24 fps</option>
+                            <option value="30" selected>30 fps</option>
+                            <option value="60">60 fps — плавно</option>
+                        </select>
+                    </div>
+                    <div class="settings-section">
+                        <div class="settings-label">Битрейт <em>видео</em></div>
+                        <select id="call-bitrate">
+                            <option value="1000000">1 Мбит/с — экономно</option>
+                            <option value="2500000">2.5 Мбит/с</option>
+                            <option value="5000000" selected>5 Мбит/с</option>
+                            <option value="10000000">10 Мбит/с — HQ</option>
+                            <option value="20000000">20 Мбит/с — 4K</option>
+                        </select>
+                    </div>
+                    <div class="settings-section">
+                        <div class="settings-label">Кодек</div>
+                        <select id="call-codec">
+                            <option value="auto" selected>Авто (лучший доступный)</option>
+                            <option value="vp9">VP9</option>
+                            <option value="vp8">VP8</option>
+                            <option value="h264">H.264</option>
+                            <option value="av1">AV1</option>
+                        </select>
+                    </div>
+                    <div class="settings-section">
+                        <div class="settings-label">Обработка звука</div>
+                        <label class="toggle-row"><input type="checkbox" id="call-echo" checked> Эхоподавление</label>
+                        <label class="toggle-row"><input type="checkbox" id="call-noise" checked> Шумоподавление</label>
+                        <label class="toggle-row"><input type="checkbox" id="call-agc" checked> Автоуровень громкости</label>
+                    </div>
+                    <div class="settings-section">
+                        <div class="settings-label">Экран</div>
+                        <label class="toggle-row"><input type="checkbox" id="call-mirror"> Зеркалить своё видео</label>
+                        <label class="toggle-row"><input type="checkbox" id="call-stats-toggle" checked> Показывать статистику</label>
+                    </div>
+                    <div class="settings-hint" id="call-support-hint"></div>
+                </section>
+
+                <!-- ПРИВАТНОСТЬ -->
+                <section class="settings-pane" id="settings-tab-privacy">
+                    <div class="settings-section">
+                        <div class="settings-label">🚫 Заблокированные</div>
+                        <div id="blocked-list"><div class="loading-small">Пусто</div></div>
+                    </div>
+                    <div class="settings-section">
+                        <div class="settings-label">🔇 Игнорируемые</div>
+                        <div id="ignored-list"><div class="loading-small">Пусто</div></div>
+                    </div>
+                </section>
+
+                <footer class="settings-foot">
+                    <div class="modal-error" id="settings-error"></div>
+                    <div class="settings-foot-actions">
+                        <button class="modal-btn secondary" data-action="close-settings">Отмена</button>
+                        <button class="modal-btn primary" id="settings-save">Сохранить</button>
+                    </div>
+                </footer>
             </div>
         </div>
     </div>
 
-    <script src="/static/script.js"></script>
+    <!-- ============================================
+         МОДАЛКА: СОЗДАТЬ СЕРВЕР
+         ============================================ -->
+    <div id="server-modal" class="modal-overlay">
+        <div class="modal-box">
+            <h3 id="server-modal-title">Создать сервер</h3>
+            <p class="modal-hint">Сервер — это тусовка с каналами, как в Discord.</p>
+
+            <div class="emoji-picker" id="server-icon-picker"></div>
+            <input type="text" id="server-name-input" placeholder="Название сервера" maxlength="32">
+            <input type="text" id="server-desc-input" placeholder="Описание (необязательно)" maxlength="300">
+            <div class="modal-actions">
+                <button class="modal-btn secondary" data-action="close-server-modal">Отмена</button>
+                <button class="modal-btn primary" id="server-save-btn" data-action="save-server">Создать</button>
+            </div>
+            <div class="modal-error" id="server-error"></div>
+        </div>
+    </div>
+
+    <!-- ============================================
+         МОДАЛКА: ВОЙТИ ПО ПРИГЛАШЕНИЮ
+         ============================================ -->
+    <div id="join-server-modal" class="modal-overlay">
+        <div class="modal-box">
+            <h3>Войти на сервер</h3>
+            <p class="modal-hint">Вставь код приглашения, например <b>aB3xY9zQ</b>.</p>
+            <input type="text" id="invite-code-input" placeholder="код приглашения" maxlength="40">
+            <div class="modal-actions">
+                <button class="modal-btn secondary" data-action="close-join-modal">Отмена</button>
+                <button class="modal-btn primary" data-action="join-server">Войти</button>
+            </div>
+            <div class="modal-error" id="join-error"></div>
+        </div>
+    </div>
+
+    <!-- ============================================
+         МОДАЛКА: МЕНЮ СЕРВЕРА
+         ============================================ -->
+    <div id="server-menu-modal" class="modal-overlay">
+        <div class="modal-box">
+            <h3 id="server-menu-title">Сервер</h3>
+            <div class="server-menu">
+                <button class="menu-item" data-action="copy-invite">🔗 Скопировать приглашение</button>
+                <button class="menu-item" data-action="create-server-channel">＋ Создать канал</button>
+                <button class="menu-item" data-action="edit-server">✏️ Изменить сервер</button>
+                <button class="menu-item" data-action="open-join-modal">🚪 Войти по коду</button>
+                <button class="menu-item danger" data-action="leave-server">🚶 Покинуть сервер</button>
+                <button class="menu-item danger" data-action="delete-server">🗑 Удалить сервер</button>
+            </div>
+            <div class="invite-box">
+                <div class="invite-label">Код приглашения</div>
+                <code id="server-invite-code">—</code>
+            </div>
+            <div class="modal-actions">
+                <button class="modal-btn secondary" data-action="close-server-menu">Закрыть</button>
+            </div>
+            <div class="modal-error" id="server-menu-error"></div>
+        </div>
+    </div>
+
+    <!-- ============================================
+         МОДАЛКА: СОЗДАТЬ КАНАЛ
+         ============================================ -->
+    <div id="channel-modal" class="modal-overlay">
+        <div class="modal-box">
+            <h3>Новый канал</h3>
+            <input type="text" id="channel-name-input" placeholder="название-канала" maxlength="32">
+            <input type="text" id="channel-topic-input" placeholder="Тема канала (необязательно)" maxlength="120">
+            <div class="modal-actions">
+                <button class="modal-btn secondary" data-action="close-channel-modal">Отмена</button>
+                <button class="modal-btn primary" data-action="save-channel">Создать</button>
+            </div>
+            <div class="modal-error" id="channel-error"></div>
+        </div>
+    </div>
+
+    <!-- ============================================
+         МОДАЛКА: СОЗДАТЬ КАНАЛ (TELEGRAM)
+         ============================================ -->
+    <div id="tg-modal" class="modal-overlay">
+        <div class="modal-box">
+            <h3>Новый канал</h3>
+            <p class="modal-hint">Канал — лента постов. Публиковать можешь только ты.</p>
+            <input type="text" id="tg-name-input" placeholder="Название канала" maxlength="40">
+            <input type="text" id="tg-desc-input" placeholder="Описание" maxlength="300">
+            <div class="tg-color-row" id="tg-color-row"></div>
+            <label class="toggle-row"><input type="checkbox" id="tg-public" checked> Публичный канал (можно найти)</label>
+            <div class="modal-actions">
+                <button class="modal-btn secondary" data-action="close-tg-modal">Отмена</button>
+                <button class="modal-btn danger" id="tg-delete-btn" data-action="delete-tg-channel" style="display:none;">Удалить</button>
+                <button class="modal-btn primary" id="tg-save-btn" data-action="save-tg-channel">Создать</button>
+            </div>
+            <div class="modal-error" id="tg-error"></div>
+        </div>
+    </div>
+
+    <!-- ============================================
+         МОДАЛКА: НАЙТИ КАНАЛ
+         ============================================ -->
+    <div id="discover-modal" class="modal-overlay">
+        <div class="modal-box discover-box">
+            <h3>Найти канал</h3>
+            <input type="text" id="discover-input" placeholder="Название или описание…" autocomplete="off">
+            <div class="discover-list" id="discover-list"></div>
+            <div class="modal-actions">
+                <button class="modal-btn secondary" data-action="close-discover">Закрыть</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================
+         ВХОДЯЩИЙ ЗВОНОК
+         ============================================ -->
+    <div id="incoming-call" class="modal-overlay">
+        <div class="incoming-card">
+            <div class="incoming-pulse"></div>
+            <span class="av-slot av-slot-xl" id="incoming-avatar"></span>
+            <div class="incoming-name" id="incoming-name">—</div>
+            <div class="incoming-type" id="incoming-type">Входящий звонок</div>
+            <div class="incoming-actions">
+                <button class="call-round decline" data-action="reject-call" title="Отклонить">✕</button>
+                <button class="call-round accept" data-action="accept-call" title="Принять">✓</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================
+         ЗВОНОК
+         ============================================ -->
+    <div id="call-overlay" class="call-overlay">
+        <video id="remote-video" class="remote-video" autoplay playsinline></video>
+        <div id="call-placeholder" class="call-placeholder">
+            <span class="av-slot av-slot-xl" id="call-avatar"></span>
+            <div class="call-peer-name" id="call-peer-name">—</div>
+            <div class="call-state" id="call-state">Звоним…</div>
+        </div>
+
+        <video id="local-video" class="local-video" autoplay playsinline muted></video>
+
+        <div class="call-topbar">
+            <div class="call-topbar-info">
+                <span id="call-peer-name-2">—</span>
+                <span class="call-timer" id="call-timer">00:00</span>
+            </div>
+            <div class="call-stats" id="call-stats" style="display:none;"></div>
+        </div>
+
+        <div class="call-controls">
+            <button class="call-control" id="btn-mic" data-action="toggle-mic" title="Микрофон">🎙</button>
+            <button class="call-control" id="btn-cam" data-action="toggle-cam" title="Камера">🎥</button>
+            <button class="call-control" id="btn-screen" data-action="toggle-screen" title="Поделиться экраном">🖥</button>
+            <button class="call-control" data-action="open-call-settings" title="Настройки звонка">⚙</button>
+            <button class="call-control hangup" data-action="hangup" title="Завершить">📴</button>
+        </div>
+
+        <div class="call-settings-panel" id="call-settings-panel">
+            <div class="csp-title">Настройки звонка</div>
+            <label class="csp-row">Качество
+                <select id="csp-quality">
+                    <option value="480p">480p</option>
+                    <option value="720p">720p</option>
+                    <option value="1080p">1080p</option>
+                    <option value="1440p">1440p</option>
+                    <option value="2160p">4K</option>
+                </select>
+            </label>
+            <label class="csp-row">FPS
+                <select id="csp-fps">
+                    <option value="15">15</option>
+                    <option value="24">24</option>
+                    <option value="30">30</option>
+                    <option value="60">60</option>
+                </select>
+            </label>
+            <label class="csp-row">Битрейт
+                <select id="csp-bitrate">
+                    <option value="1000000">1 Мбит/с</option>
+                    <option value="2500000">2.5 Мбит/с</option>
+                    <option value="5000000">5 Мбит/с</option>
+                    <option value="10000000">10 Мбит/с</option>
+                    <option value="20000000">20 Мбит/с</option>
+                </select>
+            </label>
+            <label class="csp-row">Экран 4K
+                <input type="checkbox" id="csp-screen4k">
+            </label>
+            <button class="modal-btn primary" data-action="apply-call-settings">Применить</button>
+        </div>
+    </div>
+
+    <div class="toast-container" id="toast-container"></div>
+
+    <script src="/static/script.js?v=10"></script>
+    <script src="/static/servers.js?v=10"></script>
+    <script src="/static/channels.js?v=10"></script>
+    <script src="/static/calls.js?v=10"></script>
 </body>
 </html>

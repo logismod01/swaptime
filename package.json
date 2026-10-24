@@ -1,0 +1,13 @@
+{
+  "name": "swaptime",
+  "version": "10.0.0",
+  "private": true,
+  "description": "СвапТайм — мессенджер (FastAPI + WebSocket + vanilla JS)",
+  "scripts": {
+    "start": "python backend/server.py",
+    "test:ui": "node tests/ui/auth.test.js && node tests/ui/chat.test.js && node tests/ui/session.test.js && node tests/ui/profile.test.js && node tests/ui/v10.test.js"
+  },
+  "devDependencies": {
+    "jsdom": "^26.1.0"
+  }
+}
