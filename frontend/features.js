@@ -119,7 +119,9 @@ const FORMAT_WRAP = {
 const QUICK_REACTIONS = ["👍", "❤️", "😂", "🔥", "🎉", "😮", "😢", "👀"];
 
 function reactionScopeOf(msg, scope) {
-  return scope === "channel" ? "channel" : "dm";
+  if (scope === "channel") return "channel";
+  if (scope === "tg_post") return "tg_post";
+  return "dm";
 }
 
 function buildReactionsNode(msg, scope) {
@@ -239,7 +241,18 @@ function closeReactionPicker() {
 
 function toggleReaction(msg, emoji, scope) {
   if (!msg || !msg.id) return;
-  const payload = { type: "reaction", id: msg.id, emoji, scope: reactionScopeOf(msg, scope) };
+  const effective = reactionScopeOf(msg, scope);
+
+  // посты Telegram-каналов идут только через REST (у WS нет такого scope)
+  if (effective === "tg_post") {
+    api("/api/reactions", {
+      method: "POST",
+      body: { scope: "tg_post", message_id: msg.id, emoji },
+    }).catch((err) => toast(err.message || "Не удалось поставить реакцию", "error"));
+    return;
+  }
+
+  const payload = { type: "reaction", id: msg.id, emoji, scope: effective };
   if (scope === "channel") payload.channel_id = msg.channel_id || state.activeChannel;
   const sent = sendWS(payload);
   if (!sent) {
@@ -262,6 +275,17 @@ function findMessageObjectById(id) {
 
 function applyReactionEvent(msg) {
   if (!msg || !msg.message_id) return;
+
+  // реакции на постах Telegram-каналов
+  if (msg.scope === "tg_post") {
+    const post = state.tgData && (state.tgData.posts || []).find((p) => p.id === msg.message_id);
+    if (post) {
+      post.reactions = msg.reactions || [];
+      if (typeof renderTgFeed === "function") renderTgFeed();
+    }
+    return;
+  }
+
   const scope = msg.scope === "channel" ? "channel" : "dm";
   const target = findMessageObjectById(msg.message_id);
   if (target) target.reactions = msg.reactions || [];

@@ -217,6 +217,12 @@ function renderTgFeed() {
       card.appendChild(el("div", "tg-post-edited", "изменён"));
     }
 
+    // реакции на постах — как в Telegram
+    if (!post.deleted && typeof buildReactionsNode === "function") {
+      const reactions = buildReactionsNode(post, "tg_post");
+      if (reactions) card.appendChild(reactions);
+    }
+
     if (index === posts.length - 1) card.classList.add("last");
     feed.appendChild(card);
   });

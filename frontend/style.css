@@ -3334,3 +3334,416 @@ body.in-call { overflow: hidden; }
     .favorites-list { max-height: 40vh; }
     .chat-pin-btn { opacity: 0.5; right: 26px; }
 }
+
+/* ============================================================
+   v13 — ВЛОЖЕНИЯ, ОПРОСЫ, ПАПКИ, ПОИСК, ТУР, СТАТИСТИКА
+   ============================================================ */
+
+/* ---------- инструменты композера ---------- */
+.v13-tools { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+.v13-tool {
+    width: 32px; height: 32px;
+    border-radius: 9px;
+    font-size: 15px;
+    line-height: 1;
+    color: var(--dim);
+    display: inline-flex; align-items: center; justify-content: center;
+    transition: background 0.14s, color 0.14s, transform 0.14s;
+}
+.v13-tool:hover { background: var(--hover); color: var(--text); transform: translateY(-1px); }
+.v13-tool.recording { background: rgba(229, 57, 53, 0.18); color: #ff8a80; animation: v13-pulse 1.2s infinite; }
+.v13-file-input { display: none; }
+
+@keyframes v13-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(229, 57, 53, 0.45); } 50% { box-shadow: 0 0 0 6px rgba(229, 57, 53, 0); } }
+
+/* ---------- запись голосового ---------- */
+.v13-voice-bar {
+    display: flex; align-items: center; gap: 10px;
+    margin: 0 16px 6px;
+    padding: 8px 12px;
+    border-radius: 12px;
+    background: rgba(229, 57, 53, 0.12);
+    border: 1px solid rgba(229, 57, 53, 0.35);
+    color: var(--text);
+    font-size: 12.5px;
+}
+.v13-voice-dot { width: 9px; height: 9px; border-radius: 50%; background: #ff5252; animation: v13-pulse 1s infinite; }
+.v13-voice-timer { font-variant-numeric: tabular-nums; font-weight: 700; }
+.v13-voice-hint { color: var(--mute); }
+.v13-voice-cancel {
+    margin-left: auto; width: 26px; height: 26px; border-radius: 8px;
+    color: var(--dim); background: rgba(0, 0, 0, 0.2);
+}
+.v13-voice-cancel:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
+
+/* ---------- вложения в сообщении ---------- */
+.attach-wrap { margin-top: 6px; max-width: 100%; }
+
+.attach-image {
+    display: block;
+    padding: 0;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    background: #000;
+    max-width: min(420px, 100%);
+    transition: transform 0.16s, border-color 0.16s;
+}
+.attach-image:hover { transform: translateY(-1px); border-color: var(--accent); }
+.attach-image img {
+    display: block;
+    max-width: 100%;
+    max-height: 320px;
+    object-fit: cover;
+}
+
+.attach-audio {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border-soft);
+    max-width: min(420px, 100%);
+}
+.audio-play {
+    width: 34px; height: 34px; flex-shrink: 0;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff; font-size: 13px;
+    display: inline-flex; align-items: center; justify-content: center;
+}
+.audio-play:hover { background: var(--accent-hover); }
+.audio-bars { display: flex; align-items: center; gap: 2px; height: 30px; flex: 1 1 auto; min-width: 40px; }
+.audio-bar {
+    width: 3px; border-radius: 2px;
+    background: rgba(255, 255, 255, 0.22);
+    transition: background 0.15s;
+}
+.audio-bar.played { background: var(--accent-hover); }
+.audio-time { font-size: 11.5px; color: var(--mute); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.attach-file {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border-soft);
+    color: var(--text);
+    text-decoration: none;
+    max-width: min(420px, 100%);
+    transition: border-color 0.16s, background 0.16s;
+}
+.attach-file:hover { border-color: var(--accent); background: rgba(229, 57, 53, 0.08); }
+.file-icon { font-size: 20px; }
+.file-meta { display: flex; flex-direction: column; min-width: 0; }
+.file-name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-size { font-size: 11px; color: var(--mute); }
+.file-download { margin-left: auto; color: var(--dim); }
+
+/* ---------- лайтбокс ---------- */
+.v13-lightbox {
+    position: fixed; inset: 0; z-index: 4000;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(0, 0, 0, 0.82);
+    backdrop-filter: blur(6px);
+    opacity: 0; transition: opacity 0.18s;
+    padding: 24px;
+}
+.v13-lightbox.active { opacity: 1; }
+.v13-lightbox-img { max-width: 92vw; max-height: 88vh; border-radius: 12px; box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6); }
+.v13-lightbox-close {
+    position: absolute; top: 18px; right: 20px;
+    width: 40px; height: 40px; border-radius: 12px;
+    background: rgba(255, 255, 255, 0.12); color: #fff; font-size: 17px;
+}
+.v13-lightbox-close:hover { background: rgba(255, 255, 255, 0.22); }
+
+/* ---------- опросы ---------- */
+.poll-card {
+    margin-top: 7px;
+    padding: 10px 12px;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border-soft);
+    max-width: min(440px, 100%);
+    display: flex; flex-direction: column; gap: 6px;
+}
+.poll-question { font-size: 13.5px; font-weight: 700; margin-bottom: 2px; }
+.poll-option {
+    position: relative;
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border-soft);
+    color: var(--text);
+    font-size: 12.5px;
+    overflow: hidden;
+    text-align: left;
+    transition: border-color 0.14s, background 0.14s;
+}
+.poll-option:hover:not(:disabled) { border-color: var(--accent); }
+.poll-option:disabled { opacity: 0.6; cursor: default; }
+.poll-option.mine { border-color: var(--accent); }
+.poll-fill {
+    position: absolute; left: 0; top: 0; bottom: 0;
+    background: rgba(229, 57, 53, 0.18);
+    pointer-events: none;
+    transition: width 0.25s ease;
+}
+.poll-option-text { position: relative; flex: 1 1 auto; }
+.poll-option-count { position: relative; font-size: 11.5px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.poll-footer { display: flex; gap: 10px; align-items: center; font-size: 11px; color: var(--mute); }
+.poll-mine { color: #7ee2a8; }
+.poll-options-inputs { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; }
+.poll-modal-box .modal-btn.secondary { margin-bottom: 8px; }
+
+/* ---------- слэш-команды ---------- */
+.slash-menu {
+    position: fixed; z-index: 3200;
+    display: none;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px;
+    border-radius: 12px;
+    background: var(--elev);
+    border: 1px solid var(--border);
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
+    max-height: 260px;
+    overflow-y: auto;
+}
+.slash-menu.active { display: flex; }
+.slash-item {
+    display: flex; align-items: baseline; gap: 10px;
+    padding: 7px 9px;
+    border-radius: 8px;
+    color: var(--text);
+    text-align: left;
+    font-size: 12.5px;
+}
+.slash-item:hover, .slash-item.active { background: var(--hover); }
+.slash-cmd { font-weight: 700; color: #ff9a95; font-family: var(--app-font); }
+.slash-hint { color: var(--mute); font-size: 11.5px; }
+
+/* ---------- глобальный поиск ---------- */
+.v13-search-overlay {
+    position: fixed; inset: 0; z-index: 3500;
+    display: flex; align-items: flex-start; justify-content: center;
+    padding: 10vh 16px 24px;
+    background: rgba(4, 4, 8, 0.66);
+    backdrop-filter: blur(4px);
+}
+.v13-search-box {
+    width: 100%; max-width: 640px;
+    background: var(--elev);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55);
+    overflow: hidden;
+    display: flex; flex-direction: column;
+    max-height: 74vh;
+}
+.v13-search-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--border-soft); }
+.v13-search-icon { font-size: 14px; opacity: 0.8; }
+.v13-search-head input {
+    flex: 1 1 auto; background: none; border: none; color: var(--text);
+    font-size: 14.5px; padding: 4px 0;
+}
+.v13-search-close { width: 28px; height: 28px; border-radius: 8px; color: var(--dim); }
+.v13-search-close:hover { background: var(--hover); color: var(--text); }
+.v13-search-results { overflow-y: auto; padding: 6px; }
+.v13-search-group {
+    padding: 10px 10px 4px;
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.6px;
+    color: var(--mute); font-weight: 700;
+}
+.v13-search-item {
+    display: flex; align-items: center; gap: 10px;
+    width: 100%;
+    padding: 9px 10px;
+    border-radius: 10px;
+    text-align: left;
+    color: var(--text);
+}
+.v13-search-item:hover { background: var(--hover); }
+.v13-search-av {
+    width: 30px; height: 30px; border-radius: 10px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: 13px; color: #fff; flex-shrink: 0;
+}
+.v13-search-text { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
+.v13-search-title { font-size: 13px; font-weight: 600; }
+.v13-search-sub { font-size: 11.5px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v13-search-empty { padding: 22px 14px; text-align: center; color: var(--mute); font-size: 12.5px; }
+
+/* ---------- папки чатов ---------- */
+.v13-folders {
+    display: flex; gap: 6px;
+    padding: 8px 10px 6px;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+.v13-folders::-webkit-scrollbar { display: none; }
+.v13-folder {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 5px 10px;
+    border-radius: 999px;
+    background: var(--elev);
+    border: 1px solid transparent;
+    color: var(--dim);
+    font-size: 11.5px;
+    white-space: nowrap;
+    flex-shrink: 0;
+    transition: background 0.14s, color 0.14s, border-color 0.14s;
+}
+.v13-folder:hover { background: var(--hover); color: var(--text); }
+.v13-folder.active { background: rgba(229, 57, 53, 0.18); border-color: rgba(229, 57, 53, 0.5); color: #ffb4b0; }
+.v13-folder-icon { font-size: 11px; }
+.v13-folder-badge { font-size: 10px; color: #fff; background: var(--accent); border-radius: 999px; padding: 0 5px; }
+.v13-folder-badge:empty { display: none; }
+.v13-folder-add { font-weight: 700; padding: 5px 9px; }
+
+.v13-servers-folder { display: flex; flex-direction: column; gap: 2px; padding: 4px 6px 8px; }
+.v13-server-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 7px 8px;
+    border-radius: 9px;
+    color: var(--text);
+    text-align: left;
+}
+.v13-server-row:hover { background: var(--hover); }
+.v13-server-icon {
+    width: 30px; height: 30px; border-radius: 10px;
+    display: inline-flex; align-items: center; justify-content: center;
+    color: #fff; font-weight: 800; font-size: 13px;
+}
+.v13-server-name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- категории каналов ---------- */
+.channel-category {
+    display: flex; align-items: center; gap: 6px;
+    width: 100%;
+    margin: 8px 0 2px;
+    padding: 4px 6px;
+    border-radius: 7px;
+    color: var(--mute);
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.channel-category:hover { color: var(--text); background: rgba(255, 255, 255, 0.03); }
+.channel-category-caret { font-size: 9px; width: 10px; }
+.channel-category-count { margin-left: auto; font-size: 10px; opacity: 0.7; }
+.channel-edit {
+    margin-left: auto;
+    width: 20px; height: 20px;
+    border-radius: 6px;
+    color: var(--mute);
+    font-size: 11px;
+    opacity: 0;
+    transition: opacity 0.12s, background 0.12s;
+}
+.channel-item:hover .channel-edit { opacity: 1; }
+.channel-edit:hover { background: rgba(255, 255, 255, 0.1); color: var(--text); }
+
+/* ---------- мобильные вкладки ---------- */
+.v13-mobile-tabs { display: none; }
+@media (max-width: 760px) {
+    .v13-mobile-tabs {
+        display: flex;
+        position: fixed;
+        left: 0; right: 0; bottom: 0;
+        z-index: 900;
+        height: calc(56px + env(safe-area-inset-bottom));
+        padding-bottom: env(safe-area-inset-bottom);
+        background: rgba(13, 13, 18, 0.96);
+        border-top: 1px solid var(--border);
+        backdrop-filter: blur(10px);
+    }
+    .v13-tab {
+        flex: 1 1 0;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 2px;
+        color: var(--mute);
+        position: relative;
+        font-size: 10px;
+    }
+    .v13-tab.active { color: #ff8a80; }
+    .v13-tab.active::before {
+        content: "";
+        position: absolute; top: 0; left: 50%; transform: translateX(-50%);
+        width: 26px; height: 2px; border-radius: 2px; background: var(--accent);
+    }
+    .v13-tab-icon { font-size: 17px; }
+    .v13-tab-badge {
+        position: absolute; top: 4px; right: calc(50% - 20px);
+        min-width: 15px; height: 15px;
+        border-radius: 999px;
+        background: var(--accent);
+        color: #fff; font-size: 9px;
+        display: inline-flex; align-items: center; justify-content: center;
+        padding: 0 4px;
+    }
+    .v13-tab-badge[hidden] { display: none; }
+    /* освобождаем место под панель: колонки ужимаются, композер остаётся прижатым */
+    body.on-chat .chat-area,
+    body.on-chat .sidebar { padding-bottom: calc(56px + env(safe-area-inset-bottom)); }
+    body.on-chat .messages { padding-bottom: 8px; }
+    .jump-bottom { bottom: calc(76px + env(safe-area-inset-bottom)) !important; }
+}
+
+/* ---------- онбординг ---------- */
+.v13-tour { position: fixed; inset: 0; z-index: 3600; background: rgba(3, 3, 7, 0.55); }
+.v13-tour-spot {
+    position: absolute;
+    border-radius: 14px;
+    box-shadow: 0 0 0 9999px rgba(3, 3, 7, 0.55), 0 0 0 2px rgba(229, 57, 53, 0.8);
+    pointer-events: none;
+    transition: all 0.2s ease;
+}
+.v13-tour-card {
+    position: absolute;
+    width: 340px;
+    padding: 18px 18px 14px;
+    border-radius: 16px;
+    background: var(--elev);
+    border: 1px solid var(--border);
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+}
+.v13-tour-step { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.7px; color: #ff8a80; font-weight: 700; }
+.v13-tour-card h3 { margin: 6px 0 6px; font-size: 16px; }
+.v13-tour-card p { font-size: 12.5px; line-height: 1.55; color: var(--dim); }
+.v13-tour-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+
+/* ---------- статистика ---------- */
+.v13-stats-box { width: 520px; max-width: calc(100vw - 32px); max-height: 86vh; overflow-y: auto; }
+.v13-stats-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.v13-stats-head h3 { font-size: 16px; }
+.v13-stats-close { width: 28px; height: 28px; border-radius: 8px; color: var(--dim); }
+.v13-stats-close:hover { background: var(--hover); color: var(--text); }
+.v13-stats-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 14px 0; }
+.v13-stat-card { padding: 10px; border-radius: 12px; background: rgba(255, 255, 255, 0.04); border: 1px solid var(--border-soft); }
+.v13-stat-value { font-size: 20px; font-weight: 800; }
+.v13-stat-label { font-size: 10.5px; color: var(--mute); margin-top: 2px; }
+.v13-chart { display: flex; align-items: flex-end; gap: 6px; height: 110px; padding: 6px 2px 0; margin-bottom: 8px; }
+.v13-chart-col { flex: 1 1 0; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 4px; height: 100%; }
+.v13-chart-bar {
+    width: 100%;
+    border-radius: 5px 5px 2px 2px;
+    background: linear-gradient(180deg, var(--accent), rgba(229, 57, 53, 0.35));
+    min-height: 3px;
+}
+.v13-chart-label { font-size: 9.5px; color: var(--mute); }
+.v13-stats-sub { margin: 12px 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--mute); font-weight: 700; }
+.v13-stats-rows { display: flex; flex-direction: column; gap: 6px; }
+.v13-stat-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.v13-stat-name { width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v13-stat-track { flex: 1 1 auto; height: 7px; border-radius: 999px; background: rgba(255, 255, 255, 0.07); overflow: hidden; }
+.v13-stat-fill { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--accent), #ff8a80); }
+.v13-stat-count { font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; width: 34px; text-align: right; }
+
+.v13-stats-btn { font-size: 14px; }
+
+/* мобильная панель видна только внутри приложения */
+body:not(.on-chat) .v13-mobile-tabs { display: none !important; }

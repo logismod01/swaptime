@@ -86,6 +86,13 @@ FRAMES = [
 BANNERS = ["crimson", "sunset", "ocean", "forest", "galaxy", "night", "mono"]
 
 MAX_AVATAR_CHARS = 420_000  # ~300 КБ картинки в base64
+MAX_ATTACH_CHARS = 2_600_000  # ~1.9 МБ данных вложения в base64
+MAX_ATTACH_SECONDS = 600      # голосовое — до 10 минут
+ATTACH_KINDS = ("image", "audio", "file")
+ATTACH_DATA_RE = re.compile(r"^data:(image/[a-zA-Z0-9.+-]+|audio/[a-zA-Z0-9.+-]+|application/[a-zA-Z0-9.+-]+|text/[a-zA-Z0-9.+-]+);base64,[A-Za-z0-9+/=]+$")
+# эти типы умеют исполнять скрипты при открытии — не принимаем
+ATTACH_BLOCKED = ("text/html", "text/xml", "image/svg", "application/xhtml", "application/javascript",
+                  "text/javascript")
 AVATAR_RE = re.compile(r"^data:image/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=\s]+$")
 BIO_MAX = 190
 
@@ -352,6 +359,15 @@ def init_db() -> None:
     _add_column(c, "messages", "pinned_at", "INTEGER DEFAULT 0")
     _add_column(c, "messages", "fwd_from", "TEXT DEFAULT ''")
     _add_column(c, "messages", "fwd_name", "TEXT DEFAULT ''")
+    for table in ("messages", "server_messages"):
+        _add_column(c, table, "attach_data", "TEXT DEFAULT ''")
+        _add_column(c, table, "attach_kind", "TEXT DEFAULT ''")
+        _add_column(c, table, "attach_name", "TEXT DEFAULT ''")
+        _add_column(c, table, "attach_size", "INTEGER DEFAULT 0")
+        _add_column(c, table, "attach_duration", "INTEGER DEFAULT 0")
+    _add_column(c, "server_channels", "category", "TEXT DEFAULT ''")
+    for table in ("messages", "server_messages"):
+        _add_column(c, table, "poll_data", "TEXT DEFAULT ''")
     _add_column(c, "server_messages", "pinned", "INTEGER DEFAULT 0")
     _add_column(c, "server_messages", "pinned_by", "TEXT DEFAULT ''")
     _add_column(c, "server_messages", "pinned_at", "INTEGER DEFAULT 0")
@@ -603,6 +619,12 @@ class PresenceIn(BaseModel):
     status_text: Optional[str] = None
 
 
+class PollVoteIn(BaseModel):
+    scope: str = "dm"
+    message_id: int
+    option: int
+
+
 class ReactionIn(BaseModel):
     scope: str = "dm"            # 'dm' | 'channel'
     message_id: int
@@ -722,13 +744,162 @@ def mark_read(username: str, chat_with: str) -> int:
 # ============================================
 MSG_COLUMNS = (
     "id, from_user, to_user, text, reply_to, edited, deleted, client_id, created_at, "
-    "pinned, pinned_by, pinned_at, fwd_from, fwd_name"
+    "pinned, pinned_by, pinned_at, fwd_from, fwd_name, "
+    "attach_data, attach_kind, attach_name, attach_size, attach_duration, poll_data"
 )
 
 SRV_MSG_COLUMNS = (
     "id, channel_id, from_user, text, edited, deleted, client_id, created_at, "
-    "pinned, pinned_by, pinned_at"
+    "pinned, pinned_by, pinned_at, attach_data, attach_kind, attach_name, attach_size, attach_duration, "
+    "poll_data"
 )
+
+
+def _attachment_out(row: sqlite3.Row, with_data: bool = True) -> Optional[dict]:
+    """Вложение сообщения в виде объекта (данные можно не отдавать — для списков)."""
+    kind = (row["attach_kind"] or "") if "attach_kind" in row.keys() else ""
+    data = (row["attach_data"] or "") if "attach_data" in row.keys() else ""
+    if not kind or not data:
+        return None
+    item = {
+        "kind": kind,
+        "name": (row["attach_name"] or "") if "attach_name" in row.keys() else "",
+        "size": (row["attach_size"] or 0) if "attach_size" in row.keys() else 0,
+        "duration": (row["attach_duration"] or 0) if "attach_duration" in row.keys() else 0,
+    }
+    if with_data:
+        item["data"] = data
+    else:
+        item["has_data"] = True
+    return item
+
+
+POLL_OPTIONS_MIN = 2
+POLL_OPTIONS_MAX = 8
+POLL_QUESTION_MAX = 200
+POLL_OPTION_MAX = 80
+
+
+def _clean_poll(raw) -> str:
+    """Проверяет опрос из запроса и возвращает JSON для хранения ('' если опроса нет)."""
+    if not raw:
+        return ""
+    if not isinstance(raw, dict):
+        raise HTTPException(400, "Некорректный опрос")
+
+    question = " ".join(str(raw.get("question") or "").split())[:POLL_QUESTION_MAX]
+    options = []
+    for item in (raw.get("options") or []):
+        text = " ".join(str(item).split())[:POLL_OPTION_MAX]
+        if text and text not in options:
+            options.append(text)
+    if not question:
+        raise HTTPException(400, "Нужен вопрос опроса")
+    if len(options) < POLL_OPTIONS_MIN:
+        raise HTTPException(400, f"Нужно минимум {POLL_OPTIONS_MIN} варианта")
+    if len(options) > POLL_OPTIONS_MAX:
+        options = options[:POLL_OPTIONS_MAX]
+
+    return json.dumps({"q": question, "options": options, "votes": [[] for _ in options]}, ensure_ascii=False)
+
+
+def _poll_out(raw: str, viewer: str = "") -> Optional[dict]:
+    """Опрос из БД → объект для клиента (счётчики + кто как голосовал)."""
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    options = [str(o) for o in (data.get("options") or [])]
+    votes = data.get("votes") or []
+    if not options:
+        return None
+    voters = []
+    for idx in range(len(options)):
+        entry = votes[idx] if idx < len(votes) else []
+        voters.append([str(u) for u in entry if u])
+    counts = [len(v) for v in voters]
+    mine = None
+    if viewer:
+        for idx, users in enumerate(voters):
+            if viewer in users:
+                mine = idx
+                break
+    return {
+        "question": str(data.get("q") or ""),
+        "options": options,
+        "counts": counts,
+        "total": sum(counts),
+        "voters": voters,
+        "my_vote": mine,
+    }
+
+
+def _poll_vote(raw: str, username: str, option: int) -> Optional[str]:
+    """Голос за вариант (один голос на человека). Возвращает новый JSON или None."""
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    options = data.get("options") or []
+    if option < 0 or option >= len(options):
+        return None
+
+    votes = data.get("votes") or [[] for _ in options]
+    while len(votes) < len(options):
+        votes.append([])
+    for users in votes:
+        if username in users:
+            users.remove(username)
+    votes[option].append(username)
+    data["votes"] = votes
+    return json.dumps(data, ensure_ascii=False)
+
+
+def _clean_attachment(raw) -> Optional[tuple]:
+    """Проверяет вложение из запроса. Возвращает (data, kind, name, size, duration) или None.
+
+    Бросает HTTPException, если данные подозрительные или слишком большие.
+    """
+    if not raw:
+        return None
+    if not isinstance(raw, dict):
+        raise HTTPException(400, "Некорректное вложение")
+
+    data = str(raw.get("data") or "").strip()
+    if not data:
+        return None
+    if len(data) > MAX_ATTACH_CHARS:
+        raise HTTPException(413, "Файл слишком большой (макс. ~1.9 МБ)")
+    if not ATTACH_DATA_RE.match(data):
+        raise HTTPException(400, "Поддерживаются картинки, аудио и обычные файлы")
+    mime = data[5: data.index(";")].lower()
+    if mime.startswith(ATTACH_BLOCKED):
+        raise HTTPException(400, "Такой тип файла не принимается из соображений безопасности")
+
+    kind = str(raw.get("kind") or "").strip().lower()
+    if kind not in ATTACH_KINDS:
+        if data.startswith("data:image/"):
+            kind = "image"
+        elif data.startswith("data:audio/"):
+            kind = "audio"
+        else:
+            kind = "file"
+
+    name = " ".join(str(raw.get("name") or "").split())[:80]
+    try:
+        size = max(0, int(raw.get("size") or 0))
+    except (TypeError, ValueError):
+        size = 0
+    try:
+        duration = max(0, min(int(raw.get("duration") or 0), MAX_ATTACH_SECONDS))
+    except (TypeError, ValueError):
+        duration = 0
+
+    return (data, kind, name, size, duration)
 
 
 REACTION_EMOJI_MAX = 16
@@ -796,10 +967,18 @@ def _replies_map(conn: sqlite3.Connection, ids) -> Dict[int, dict]:
     }
 
 
-def message_dict(row: sqlite3.Row, replies: Dict[int, dict], reactions: Optional[dict] = None) -> dict:
+def message_dict(
+    row: sqlite3.Row,
+    replies: Dict[int, dict],
+    reactions: Optional[dict] = None,
+    with_media: bool = True,
+    viewer: str = "",
+) -> dict:
     reply_to = row["reply_to"] or 0
     return {
         "reactions": (reactions or {}).get(row["id"], []),
+        "attachment": _attachment_out(row, with_media),
+        "poll": _poll_out(row["poll_data"] if "poll_data" in row.keys() else "", viewer),
         "id": row["id"],
         "client_id": row["client_id"],
         "from": row["from_user"],
@@ -818,7 +997,7 @@ def message_dict(row: sqlite3.Row, replies: Dict[int, dict], reactions: Optional
     }
 
 
-def fetch_message(conn: sqlite3.Connection, message_id: int) -> Optional[dict]:
+def fetch_message(conn: sqlite3.Connection, message_id: int, viewer: str = "") -> Optional[dict]:
     row = conn.execute(
         f"SELECT {MSG_COLUMNS} FROM messages WHERE id = ?", (message_id,)
     ).fetchone()
@@ -828,6 +1007,7 @@ def fetch_message(conn: sqlite3.Connection, message_id: int) -> Optional[dict]:
         row,
         _replies_map(conn, [row["reply_to"]]),
         _reactions_map(conn, "dm", [row["id"]]),
+        viewer=viewer,
     )
 
 
@@ -843,7 +1023,7 @@ def messages_between(conn: sqlite3.Connection, me: str, other: str, limit: int) 
     rows = list(reversed(rows))
     replies = _replies_map(conn, [r["reply_to"] for r in rows])
     reactions = _reactions_map(conn, "dm", [r["id"] for r in rows])
-    return [message_dict(r, replies, reactions) for r in rows]
+    return [message_dict(r, replies, reactions, viewer=me) for r in rows]
 
 
 # ============================================
@@ -1135,6 +1315,42 @@ async def toggle_reaction(data: ReactionIn, user: str = Depends(auth_user)):
     if not emoji:
         raise HTTPException(400, "Пустая реакция")
 
+    if data.scope == "tg_post":
+        conn = db_connect()
+        row = conn.execute(
+            "SELECT p.channel_id, p.deleted, c.owner, c.is_public FROM tg_posts p "
+            "JOIN tg_channels c ON c.id = p.channel_id WHERE p.id = ?",
+            (data.message_id,),
+        ).fetchone()
+        if not row:
+            conn.close()
+            raise HTTPException(404, "Пост не найден")
+        if row["deleted"]:
+            conn.close()
+            raise HTTPException(400, "Пост удалён")
+        allowed = row["owner"] == user or bool(row["is_public"]) or conn.execute(
+            "SELECT 1 FROM tg_subscribers WHERE channel_id = ? AND username = ?",
+            (row["channel_id"], user),
+        ).fetchone()
+        if not allowed:
+            conn.close()
+            raise HTTPException(403, "Это закрытый канал")
+        subscribers = [r["username"] for r in conn.execute(
+            "SELECT username FROM tg_subscribers WHERE channel_id = ?", (row["channel_id"],)
+        ).fetchall()]
+        owner = row["owner"]
+        channel_id = row["channel_id"]
+        conn.close()
+
+        reactions = _toggle_reaction("tg_post", data.message_id, user, emoji)
+        payload = {
+            "type": "reaction", "scope": "tg_post", "channel_id": channel_id,
+            "message_id": data.message_id, "reactions": reactions,
+        }
+        for name in set(subscribers) | {owner}:
+            await send_to_user(name, payload)
+        return {"ok": True, "reactions": reactions}
+
     if data.scope == "channel":
         conn = db_connect()
         row = conn.execute(
@@ -1171,6 +1387,188 @@ async def toggle_reaction(data: ReactionIn, user: str = Depends(auth_user)):
     await send_to_user(row["from_user"], payload)
     await send_to_user(row["to_user"], payload)
     return {"ok": True, "reactions": reactions}
+
+
+@app.post("/api/polls/vote")
+async def vote_poll(data: PollVoteIn, user: str = Depends(auth_user)):
+    """Голос в опросе (личка / канал сервера). Один голос на человека, можно менять."""
+    scope = data.scope if data.scope in ("dm", "channel") else "dm"
+
+    if scope == "channel":
+        conn = db_connect()
+        row = conn.execute(
+            "SELECT m.poll_data, m.channel_id, c.server_id FROM server_messages m "
+            "JOIN server_channels c ON c.id = m.channel_id WHERE m.id = ?",
+            (data.message_id,),
+        ).fetchone()
+        if not row:
+            conn.close()
+            raise HTTPException(404, "Сообщение не найдено")
+        if not server_role(row["server_id"], user):
+            conn.close()
+            raise HTTPException(403, "Ты не участник этого сервера")
+        updated = _poll_vote(row["poll_data"] or "", user, data.option)
+        if updated is None:
+            conn.close()
+            raise HTTPException(400, "Такого варианта нет")
+        conn.execute("UPDATE server_messages SET poll_data = ? WHERE id = ?", (updated, data.message_id))
+        conn.commit()
+        server_id, channel_id = row["server_id"], row["channel_id"]
+        conn.close()
+
+        poll = _poll_out(updated, user)
+        await broadcast_to_server(server_id, {
+            "type": "poll_update", "scope": "channel", "server_id": server_id,
+            "channel_id": channel_id, "message_id": data.message_id, "poll": poll,
+        })
+        return {"ok": True, "poll": poll}
+
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT poll_data, from_user, to_user FROM messages WHERE id = ?", (data.message_id,)
+    ).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Сообщение не найдено")
+    if user not in (row["from_user"], row["to_user"]):
+        conn.close()
+        raise HTTPException(403, "Это чужой чат")
+    updated = _poll_vote(row["poll_data"] or "", user, data.option)
+    if updated is None:
+        conn.close()
+        raise HTTPException(400, "Такого варианта нет")
+    conn.execute("UPDATE messages SET poll_data = ? WHERE id = ?", (updated, data.message_id))
+    conn.commit()
+    conn.close()
+
+    poll = _poll_out(updated, user)
+    payload = {"type": "poll_update", "scope": "dm", "message_id": data.message_id, "poll": poll}
+    await send_to_user(row["from_user"], payload)
+    await send_to_user(row["to_user"], payload)
+    return {"ok": True, "poll": poll}
+
+
+def _snippet(text: str, needle: str, pad: int = 60) -> str:
+    """Короткий фрагмент вокруг совпадения."""
+    text = (text or "").replace("\n", " ")
+    low, pat = text.casefold(), needle.casefold()
+    pos = low.find(pat)
+    if pos < 0:
+        return text[: pad * 2]
+    start = max(0, pos - pad)
+    end = min(len(text), pos + len(needle) + pad)
+    return ("…" if start else "") + text[start:end].strip() + ("…" if end < len(text) else "")
+
+
+@app.get("/api/search/global")
+async def global_search(q: str = "", limit: int = Query(default=20, ge=1, le=50), user: str = Depends(auth_user)):
+    """Глобальный поиск: люди, личные сообщения, каналы серверов, посты TG-каналов."""
+    needle = (q or "").strip()
+    if len(needle) < 2:
+        return {"query": needle, "people": [], "dms": [], "channels": [], "posts": [], "total": 0}
+
+    pat = needle.casefold()
+    conn = db_connect()
+    people = []
+    for row in conn.execute(
+        "SELECT username, display_name, avatar_color FROM users WHERE username != ? ORDER BY username LIMIT 2000",
+        (user,),
+    ).fetchall():
+        if pat in (row["username"] or "").casefold() or pat in (row["display_name"] or "").casefold():
+            people.append({
+                "username": row["username"],
+                "display_name": row["display_name"] or row["username"],
+                "avatar_color": row["avatar_color"] or "#6366f1",
+                "friend": are_friends(user, row["username"]),
+                "online": row["username"] in active_connections,
+            })
+    people = people[:limit]
+
+    dms = []
+    rows = conn.execute(
+        f"SELECT {MSG_COLUMNS} FROM messages WHERE (from_user = ? OR to_user = ?) AND deleted = 0 "
+        "ORDER BY id DESC LIMIT 4000",
+        (user, user),
+    ).fetchall()
+    for row in rows:
+        if pat in (row["text"] or "").casefold():
+            peer = row["to_user"] if row["from_user"] == user else row["from_user"]
+            dms.append({
+                "message_id": row["id"],
+                "peer": peer,
+                "from": row["from_user"],
+                "text": _snippet(row["text"], needle),
+                "created_at": row["created_at"],
+            })
+            if len(dms) >= limit:
+                break
+
+    channels = []
+    server_ids = [r["server_id"] for r in conn.execute(
+        "SELECT server_id FROM server_members WHERE username = ?", (user,)
+    ).fetchall()]
+    if server_ids:
+        placeholders = ",".join("?" * len(server_ids))
+        rows = conn.execute(
+            f"SELECT m.id, m.text, m.from_user, m.created_at, m.channel_id, ch.name AS channel_name, "
+            f"ch.server_id, s.name AS server_name FROM server_messages m "
+            f"JOIN server_channels ch ON ch.id = m.channel_id "
+            f"JOIN servers s ON s.id = ch.server_id "
+            f"WHERE m.deleted = 0 AND ch.server_id IN ({placeholders}) "
+            f"ORDER BY m.id DESC LIMIT 4000",
+            tuple(server_ids),
+        ).fetchall()
+        for row in rows:
+            if pat in (row["text"] or "").casefold():
+                channels.append({
+                    "message_id": row["id"],
+                    "server_id": row["server_id"],
+                    "server_name": row["server_name"],
+                    "channel_id": row["channel_id"],
+                    "channel_name": row["channel_name"],
+                    "from": row["from_user"],
+                    "text": _snippet(row["text"], needle),
+                    "created_at": row["created_at"],
+                })
+                if len(channels) >= limit:
+                    break
+
+    posts = []
+    visible = {r["id"] for r in conn.execute(
+        "SELECT id FROM tg_channels WHERE owner = ? OR is_public = 1", (user,)
+    ).fetchall()}
+    visible |= {r["channel_id"] for r in conn.execute(
+        "SELECT channel_id FROM tg_subscribers WHERE username = ?", (user,)
+    ).fetchall()}
+    if visible:
+        placeholders = ",".join("?" * len(visible))
+        rows = conn.execute(
+            f"SELECT p.id, p.text, p.created_at, p.channel_id, c.name AS channel_name FROM tg_posts p "
+            f"JOIN tg_channels c ON c.id = p.channel_id "
+            f"WHERE p.deleted = 0 AND p.channel_id IN ({placeholders}) ORDER BY p.id DESC LIMIT 4000",
+            tuple(visible),
+        ).fetchall()
+        for row in rows:
+            if pat in (row["text"] or "").casefold():
+                posts.append({
+                    "post_id": row["id"],
+                    "channel_id": row["channel_id"],
+                    "channel_name": row["channel_name"],
+                    "text": _snippet(row["text"], needle),
+                    "created_at": row["created_at"],
+                })
+                if len(posts) >= limit:
+                    break
+    conn.close()
+
+    return {
+        "query": needle,
+        "people": people,
+        "dms": dms,
+        "channels": channels,
+        "posts": posts,
+        "total": len(people) + len(dms) + len(channels) + len(posts),
+    }
 
 
 # ============================================
@@ -1649,7 +2047,7 @@ def can_call(a: str, b: str) -> bool:
 
 def _server_channels_payload(conn: sqlite3.Connection, server_id: int, viewer: str) -> list:
     rows = conn.execute(
-        "SELECT id, name, topic, position FROM server_channels "
+        "SELECT id, name, topic, position, category FROM server_channels "
         "WHERE server_id = ? ORDER BY position, id",
         (server_id,),
     ).fetchall()
@@ -1673,6 +2071,7 @@ def _server_channels_payload(conn: sqlite3.Connection, server_id: int, viewer: s
             "name": row["name"],
             "topic": row["topic"] or "",
             "position": row["position"],
+            "category": row["category"] or "",
             "unread": unread,
         })
     return channels
@@ -1757,16 +2156,20 @@ class ServerJoin(BaseModel):
 class ChannelCreate(BaseModel):
     name: str
     topic: str = ""
+    category: str = ""
 
 
 class ChannelUpdate(BaseModel):
     name: Optional[str] = None
     topic: Optional[str] = None
+    category: Optional[str] = None
 
 
 class ServerMessageIn(BaseModel):
-    text: str
+    text: str = ""
     client_id: Optional[str] = None
+    attachment: Optional[dict] = None
+    poll: Optional[dict] = None
 
 
 def _clean_channel_name(name: str) -> str:
@@ -1980,6 +2383,85 @@ async def delete_server(server_id: int, user: str = Depends(auth_user)):
     return {"ok": True}
 
 
+@app.get("/api/servers/{server_id}/stats")
+async def server_stats(server_id: int, days: int = Query(default=7, ge=1, le=30), user: str = Depends(auth_user)):
+    """Статистика сервера (как Discord Insights): активность по людям, каналам и дням."""
+    if not server_role(server_id, user):
+        raise HTTPException(403, "Ты не участник этого сервера")
+
+    conn = db_connect()
+    server = conn.execute("SELECT name FROM servers WHERE id = ?", (server_id,)).fetchone()
+    if not server:
+        conn.close()
+        raise HTTPException(404, "Сервер не найден")
+
+    channels = conn.execute(
+        "SELECT id, name FROM server_channels WHERE server_id = ? ORDER BY position, id", (server_id,)
+    ).fetchall()
+    channel_names = {r["id"]: r["name"] for r in channels}
+
+    since = int(time.time()) - days * 86400
+    rows = conn.execute(
+        "SELECT m.from_user, m.channel_id, m.created_at FROM server_messages m "
+        "JOIN server_channels c ON c.id = m.channel_id "
+        "WHERE c.server_id = ? AND m.deleted = 0 AND m.created_at >= ?",
+        (server_id, since),
+    ).fetchall()
+
+    by_user: Dict[str, int] = {}
+    by_channel: Dict[int, int] = {}
+    by_day: Dict[str, int] = {}
+    for row in rows:
+        by_user[row["from_user"]] = by_user.get(row["from_user"], 0) + 1
+        by_channel[row["channel_id"]] = by_channel.get(row["channel_id"], 0) + 1
+        day = time.strftime("%Y-%m-%d", time.localtime(row["created_at"]))
+        by_day[day] = by_day.get(day, 0) + 1
+
+    day_list = []
+    for offset in range(days - 1, -1, -1):
+        stamp = time.localtime(time.time() - offset * 86400)
+        key = time.strftime("%Y-%m-%d", stamp)
+        day_list.append({"date": key, "label": time.strftime("%d.%m", stamp), "count": by_day.get(key, 0)})
+
+    members = conn.execute(
+        "SELECT m.username, u.display_name, u.avatar_color FROM server_members m "
+        "LEFT JOIN users u ON u.username = m.username WHERE m.server_id = ?",
+        (server_id,),
+    ).fetchall()
+    member_rows = []
+    for m in members:
+        member_rows.append({
+            "username": m["username"],
+            "display_name": m["display_name"] or m["username"],
+            "avatar_color": m["avatar_color"] or "#6366f1",
+            "count": by_user.get(m["username"], 0),
+        })
+    member_rows.sort(key=lambda x: -x["count"])
+
+    total_members = conn.execute(
+        "SELECT COUNT(*) FROM server_members WHERE server_id = ?", (server_id,)
+    ).fetchone()[0]
+    total_messages = conn.execute(
+        "SELECT COUNT(*) FROM server_messages m JOIN server_channels c ON c.id = m.channel_id "
+        "WHERE c.server_id = ? AND m.deleted = 0", (server_id,)
+    ).fetchone()[0]
+    conn.close()
+
+    return {
+        "server": {"id": server_id, "name": server["name"]},
+        "days": days,
+        "total_messages": total_messages,
+        "total_members": total_members,
+        "period_messages": len(rows),
+        "members": member_rows[:15],
+        "channels": [
+            {"id": cid, "name": channel_names.get(cid, "?"), "count": by_channel.get(cid, 0)}
+            for cid in channel_names
+        ],
+        "by_day": day_list,
+    }
+
+
 @app.post("/api/servers/{server_id}/leave")
 async def leave_server(server_id: int, user: str = Depends(auth_user)):
     role = server_role(server_id, user)
@@ -2018,8 +2500,10 @@ async def create_server_channel(server_id: int, data: ChannelCreate, user: str =
         "SELECT COALESCE(MAX(position), 0) + 1 FROM server_channels WHERE server_id = ?", (server_id,)
     ).fetchone()[0]
     cur = conn.execute(
-        "INSERT INTO server_channels (server_id, name, topic, position, created_at) VALUES (?, ?, ?, ?, ?)",
-        (server_id, name, (data.topic or "").strip()[:120], pos, int(time.time())),
+        "INSERT INTO server_channels (server_id, name, topic, position, category, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (server_id, name, (data.topic or "").strip()[:120], pos,
+         " ".join((data.category or "").split())[:40], int(time.time())),
     )
     channel_id = cur.lastrowid
     conn.commit()
@@ -2036,7 +2520,8 @@ async def update_server_channel(server_id: int, channel_id: int, data: ChannelUp
 
     conn = db_connect()
     row = conn.execute(
-        "SELECT name, topic FROM server_channels WHERE id = ? AND server_id = ?", (channel_id, server_id)
+        "SELECT name, topic, category FROM server_channels WHERE id = ? AND server_id = ?",
+        (channel_id, server_id),
     ).fetchone()
     if not row:
         conn.close()
@@ -2044,7 +2529,13 @@ async def update_server_channel(server_id: int, channel_id: int, data: ChannelUp
 
     name = _clean_channel_name(data.name) if data.name else row["name"]
     topic = (data.topic or "").strip()[:120] if data.topic is not None else row["topic"]
-    conn.execute("UPDATE server_channels SET name = ?, topic = ? WHERE id = ?", (name, topic, channel_id))
+    category = (
+        " ".join((data.category or "").split())[:40] if data.category is not None else (row["category"] or "")
+    )
+    conn.execute(
+        "UPDATE server_channels SET name = ?, topic = ?, category = ? WHERE id = ?",
+        (name, topic, category, channel_id),
+    )
     conn.commit()
     conn.close()
 
@@ -2074,10 +2565,17 @@ async def delete_server_channel(server_id: int, channel_id: int, user: str = Dep
     return {"ok": True, "server": _server_payload(server_id, user)}
 
 
-def _server_message_dict(row: sqlite3.Row, conn: sqlite3.Connection) -> dict:
+def _server_message_dict(
+    row: sqlite3.Row,
+    conn: sqlite3.Connection,
+    with_media: bool = True,
+    viewer: str = "",
+) -> dict:
     reactions = _reactions_map(conn, "channel", [row["id"]]).get(row["id"], [])
     return {
         "reactions": reactions,
+        "attachment": _attachment_out(row, with_media),
+        "poll": _poll_out(row["poll_data"] if "poll_data" in row.keys() else "", viewer),
         "id": row["id"],
         "channel_id": row["channel_id"],
         "from": row["from_user"],
@@ -2116,7 +2614,7 @@ async def server_messages(
         "FROM server_messages WHERE channel_id = ? ORDER BY id DESC LIMIT ?",
         (channel_id, limit),
     ).fetchall()
-    messages = [_server_message_dict(r, conn) for r in reversed(rows)]
+    messages = [_server_message_dict(r, conn, viewer=user) for r in reversed(rows)]
     conn.close()
     return messages
 
@@ -2131,7 +2629,9 @@ async def post_server_message(
     if not server_role(server_id, user):
         raise HTTPException(403, "Ты не участник этого сервера")
     text = (data.text or "").strip()
-    if not text:
+    attach = _clean_attachment(data.attachment) or ("", "", "", 0, 0)
+    poll_data = _clean_poll(data.poll)
+    if not text and not attach[0] and not poll_data:
         raise HTTPException(400, "Пустое сообщение")
     if len(text) > MAX_SERVER_MSG:
         raise HTTPException(400, "Слишком длинное сообщение")
@@ -2144,9 +2644,10 @@ async def post_server_message(
         raise HTTPException(404, "Канал не найден")
 
     cur = conn.execute(
-        "INSERT INTO server_messages (channel_id, from_user, text, client_id, created_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (channel_id, user, text, data.client_id, int(time.time())),
+        "INSERT INTO server_messages (channel_id, from_user, text, client_id, created_at, "
+        "attach_data, attach_kind, attach_name, attach_size, attach_duration, poll_data) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (channel_id, user, text, data.client_id, int(time.time()), *attach, poll_data),
     )
     msg_id = cur.lastrowid
     conn.commit()
@@ -2178,7 +2679,7 @@ async def server_channel_pins(server_id: int, channel_id: int, user: str = Depen
         "ORDER BY pinned_at DESC, id DESC LIMIT 50",
         (channel_id,),
     ).fetchall()
-    pins = [_server_message_dict(r, conn) for r in rows]
+    pins = [_server_message_dict(r, conn, viewer=user) for r in rows]
     conn.close()
     return {"pins": pins}
 
@@ -2366,7 +2867,8 @@ def _tg_channel_payload(conn: sqlite3.Connection, row: sqlite3.Row, viewer: str)
     }
 
 
-def _tg_post_dict(row: sqlite3.Row) -> dict:
+def _tg_post_dict(row: sqlite3.Row, conn: Optional[sqlite3.Connection] = None) -> dict:
+    reactions = _reactions_map(conn, "tg_post", [row["id"]]).get(row["id"], []) if conn else []
     return {
         "id": row["id"],
         "channel_id": row["channel_id"],
@@ -2375,6 +2877,7 @@ def _tg_post_dict(row: sqlite3.Row) -> dict:
         "edited": row["edited"],
         "deleted": row["deleted"],
         "created_at": row["created_at"],
+        "reactions": reactions,
     }
 
 
@@ -2466,7 +2969,7 @@ async def get_tg_channel(channel_id: int, user: str = Depends(auth_user)):
         raise HTTPException(403, "Это закрытый канал")
 
     channel = _tg_channel_payload(conn, row, user)
-    posts = [_tg_post_dict(p) for p in conn.execute(
+    posts = [_tg_post_dict(p, conn) for p in conn.execute(
         "SELECT * FROM tg_posts WHERE channel_id = ? ORDER BY id DESC LIMIT 100", (channel_id,)
     ).fetchall()][::-1]
     conn.close()
@@ -2496,7 +2999,7 @@ async def create_tg_post(channel_id: int, data: TgPostIn, user: str = Depends(au
     )
     post_id = cur.lastrowid
     conn.commit()
-    post = _tg_post_dict(conn.execute("SELECT * FROM tg_posts WHERE id = ?", (post_id,)).fetchone())
+    post = _tg_post_dict(conn.execute("SELECT * FROM tg_posts WHERE id = ?", (post_id,)).fetchone(), conn)
     subscribers = [r["username"] for r in conn.execute(
         "SELECT username FROM tg_subscribers WHERE channel_id = ?", (channel_id,)
     ).fetchall()]
@@ -2534,7 +3037,7 @@ async def edit_tg_post(post_id: int, data: TgPostEdit, user: str = Depends(auth_
 
     conn.execute("UPDATE tg_posts SET text = ?, edited = 1 WHERE id = ?", (text, post_id))
     conn.commit()
-    post = _tg_post_dict(conn.execute("SELECT * FROM tg_posts WHERE id = ?", (post_id,)).fetchone())
+    post = _tg_post_dict(conn.execute("SELECT * FROM tg_posts WHERE id = ?", (post_id,)).fetchone(), conn)
     subscribers = [r["username"] for r in conn.execute(
         "SELECT username FROM tg_subscribers WHERE channel_id = ?", (row["channel_id"],)
     ).fetchall()]
@@ -2779,6 +3282,8 @@ def _save_message(
     reply_to: int,
     fwd_from: str = "",
     fwd_name: str = "",
+    attachment: Optional[tuple] = None,
+    poll_data: str = "",
 ):
     conn = db_connect()
     # ответ на сообщение должен существовать и относиться к этому же диалогу
@@ -2802,10 +3307,13 @@ def _save_message(
             conn.close()
             return msg, False
 
+    a_data, a_kind, a_name, a_size, a_duration = (attachment or ("", "", "", 0, 0))
     cur = conn.execute(
         "INSERT INTO messages (from_user, to_user, text, reply_to, client_id, created_at, "
-        "fwd_from, fwd_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (sender, to_user, text, reply_to, client_id, int(time.time()), fwd_from, fwd_name),
+        "fwd_from, fwd_name, attach_data, attach_kind, attach_name, attach_size, attach_duration, "
+        "poll_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (sender, to_user, text, reply_to, client_id, int(time.time()), fwd_from, fwd_name,
+         a_data, a_kind, a_name, a_size, a_duration, poll_data),
     )
     msg_id = cur.lastrowid
     conn.commit()
@@ -2851,7 +3359,23 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(defa
                 except (TypeError, ValueError):
                     reply_to = 0
 
-                if not to_user or not text:
+                try:
+                    attach = _clean_attachment(msg.get("attachment"))
+                except HTTPException as exc:
+                    await websocket.send_text(json.dumps({
+                        "type": "error", "client_id": client_id, "text": str(exc.detail),
+                    }, ensure_ascii=False))
+                    continue
+
+                try:
+                    poll_data = _clean_poll(msg.get("poll"))
+                except HTTPException as exc:
+                    await websocket.send_text(json.dumps({
+                        "type": "error", "client_id": client_id, "text": str(exc.detail),
+                    }, ensure_ascii=False))
+                    continue
+
+                if not to_user or (not text and not attach and not poll_data):
                     continue
                 if len(text) > MAX_MESSAGE_LEN:
                     await websocket.send_text(json.dumps({
@@ -2885,7 +3409,7 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(defa
                     fwd_name = ""
 
                 saved, is_new = _save_message(
-                    username, to_user, text, client_id, reply_to, fwd_from, fwd_name
+                    username, to_user, text, client_id, reply_to, fwd_from, fwd_name, attach, poll_data
                 )
                 if not saved:
                     continue
@@ -3086,7 +3610,16 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(defa
                 text = str(msg.get("text", "")).strip()
                 client_id = msg.get("client_id")
 
-                if not text or len(text) > MAX_SERVER_MSG:
+                try:
+                    attach = _clean_attachment(msg.get("attachment")) or ("", "", "", 0, 0)
+                    poll_data = _clean_poll(msg.get("poll"))
+                except HTTPException as exc:
+                    await websocket.send_text(json.dumps({
+                        "type": "error", "client_id": client_id, "text": str(exc.detail),
+                    }, ensure_ascii=False))
+                    continue
+
+                if (not text and not attach[0] and not poll_data) or len(text) > MAX_SERVER_MSG:
                     await websocket.send_text(json.dumps({
                         "type": "error", "client_id": client_id, "text": "Пустое или слишком длинное сообщение",
                     }, ensure_ascii=False))
@@ -3108,9 +3641,10 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(defa
                     continue
 
                 cur = conn.execute(
-                    "INSERT INTO server_messages (channel_id, from_user, text, client_id, created_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (channel_id, username, text, client_id, int(time.time())),
+                    "INSERT INTO server_messages (channel_id, from_user, text, client_id, created_at, "
+                    "attach_data, attach_kind, attach_name, attach_size, attach_duration, poll_data) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (channel_id, username, text, client_id, int(time.time()), *attach, poll_data),
                 )
                 msg_id = cur.lastrowid
                 conn.commit()

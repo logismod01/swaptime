@@ -83,14 +83,52 @@ function updateServerHeader() {
   document.title = data.name + " — СвапТайм";
 }
 
+function serverCollapseKey(serverId) {
+  return "swaptime_collapsed_categories:" + serverId;
+}
+
+function collapsedCategories(serverId) {
+  try {
+    return JSON.parse(localStorage.getItem(serverCollapseKey(serverId)) || "[]");
+  } catch (e) {
+    return [];
+  }
+}
+
+function toggleCategoryCollapsed(serverId, category) {
+  const list = collapsedCategories(serverId);
+  const index = list.indexOf(category);
+  if (index >= 0) list.splice(index, 1);
+  else list.push(category);
+  try {
+    localStorage.setItem(serverCollapseKey(serverId), JSON.stringify(list));
+  } catch (e) { /* приватный режим */ }
+  renderServerChannels();
+}
+
 function renderServerChannels() {
   const list = $("server-channels-list");
   if (!list || !state.serverData) return;
   clear(list);
 
   const query = ($("search-users").value || "").trim().toLowerCase();
+  const channels = state.serverData.channels || [];
+  const serverId = state.activeServer;
+  const collapsed = collapsedCategories(serverId);
 
-  (state.serverData.channels || []).forEach((channel) => {
+  // группируем по категориям (как в Discord); каналы без категории — сверху
+  const order = [];
+  const groups = new Map();
+  channels.forEach((channel) => {
+    const key = (channel.category || "").trim();
+    if (!groups.has(key)) {
+      groups.set(key, []);
+      order.push(key);
+    }
+    groups.get(key).push(channel);
+  });
+
+  const buildItem = (channel) => {
     const item = el("div", "channel-item" + (channel.id === state.activeChannel ? " active" : ""));
     item.dataset.channelId = String(channel.id);
     if (channel.unread > 0) item.classList.add("unread");
@@ -100,16 +138,70 @@ function renderServerChannels() {
     if (channel.unread > 0) {
       item.appendChild(el("span", "channel-unread", channel.unread > 99 ? "99+" : String(channel.unread)));
     }
+    if (channel.category) item.dataset.category = channel.category;
+
+    const editBtn = el("button", "channel-edit", "✎");
+    editBtn.type = "button";
+    editBtn.title = "Название и категория";
+    editBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      editChannelCategory(channel);
+    });
+    item.appendChild(editBtn);
     if (channel.name.toLowerCase().indexOf(query) === -1 && query) item.style.display = "none";
 
     item.addEventListener("click", () => openServerChannel(channel.id));
-    list.appendChild(item);
+    return item;
+  };
+
+  order.forEach((category) => {
+    const items = groups.get(category);
+    if (!category) {
+      items.forEach((channel) => list.appendChild(buildItem(channel)));
+      return;
+    }
+
+    const isCollapsed = collapsed.includes(category);
+    const head = el("button", "channel-category" + (isCollapsed ? " collapsed" : ""));
+    head.type = "button";
+    head.dataset.category = category;
+    head.appendChild(el("span", "channel-category-caret", isCollapsed ? "▸" : "▾"));
+    head.appendChild(el("span", "channel-category-name", category));
+    head.appendChild(el("span", "channel-category-count", String(items.length)));
+    head.addEventListener("click", () => toggleCategoryCollapsed(serverId, category));
+    list.appendChild(head);
+
+    if (isCollapsed) return;
+    items.forEach((channel) => list.appendChild(buildItem(channel)));
   });
 }
 
 // ============================================================
 // СООБЩЕНИЯ КАНАЛА
 // ============================================================
+async function editChannelCategory(channel) {
+  if (!state.serverData || !["owner", "admin"].includes(state.serverData.my_role)) {
+    toast("Менять категории может владелец или админ", "warn");
+    return;
+  }
+  const category = prompt(
+    "Категория для #" + channel.name + "\n(пусто — без категории)",
+    channel.category || ""
+  );
+  if (category === null) return;
+  try {
+    const data = await api(`/api/servers/${state.activeServer}/channels/${channel.id}/update`, {
+      method: "POST",
+      body: { category: category.trim() },
+    });
+    if (data.server) state.serverData = data.server;
+    renderServerChannels();
+    toast("Категория обновлена", "success", 1600);
+  } catch (err) {
+    toast(err.message || "Не удалось сохранить", "error");
+  }
+}
+
 async function openServerChannel(channelId) {
   if (!state.serverData) return;
   const channel = state.serverData.channels.find((c) => c.id === channelId);
@@ -215,6 +307,16 @@ function buildServerMessageNode(msg) {
     textInner.textContent = msg.text || "";
   }
   textEl.appendChild(textInner);
+
+  if (!msg.deleted && typeof buildAttachmentNode === "function") {
+    const attachment = buildAttachmentNode(msg, "channel");
+    if (attachment) textEl.appendChild(attachment);
+  }
+
+  if (!msg.deleted && typeof buildPollNode === "function") {
+    const poll = buildPollNode(msg, "channel");
+    if (poll) textEl.appendChild(poll);
+  }
 
   if (!msg.deleted && typeof buildReactionsNode === "function") {
     const reactions = buildReactionsNode(msg, "channel");
@@ -340,7 +442,10 @@ function cssEscape(value) {
 
 function sendServerMessage() {
   const input = $("server-input");
-  const text = input.value.trim();
+  const text =
+    typeof V13 !== "undefined" && V13.applySlashText
+      ? V13.applySlashText(input.value.trim(), "channel")
+      : input.value.trim();
   if (!text || !state.activeChannel) return;
 
   const clientId = uuid();
@@ -587,7 +692,25 @@ function openChannelModal() {
   }
   $("channel-name-input").value = "";
   $("channel-topic-input").value = "";
+  const categoryInput = $("channel-category-input");
+  if (categoryInput) {
+    categoryInput.value = ($("channel-name-input").dataset.category || "").trim();
+    delete $("channel-name-input").dataset.category;
+  }
   $("channel-error").textContent = "";
+  const dataList = $("channel-category-list");
+  if (dataList) {
+    clear(dataList);
+    const seen = new Set();
+    ((state.serverData && state.serverData.channels) || []).forEach((channel) => {
+      const name = (channel.category || "").trim();
+      if (!name || seen.has(name)) return;
+      seen.add(name);
+      const option = document.createElement("option");
+      option.value = name;
+      dataList.appendChild(option);
+    });
+  }
   $("channel-modal").classList.add("active");
   setTimeout(() => $("channel-name-input").focus(), 50);
 }
@@ -595,6 +718,8 @@ function openChannelModal() {
 async function saveChannel() {
   const name = $("channel-name-input").value.trim();
   const topic = $("channel-topic-input").value.trim();
+  const categoryEl = $("channel-category-input");
+  const category = categoryEl ? categoryEl.value.trim() : "";
   const errorEl = $("channel-error");
   errorEl.textContent = "";
 
@@ -606,7 +731,7 @@ async function saveChannel() {
   try {
     const data = await api(`/api/servers/${state.activeServer}/channels`, {
       method: "POST",
-      body: { name, topic },
+      body: { name, topic, category },
     });
     state.serverData = data.server;
     closeModal("channel-modal");

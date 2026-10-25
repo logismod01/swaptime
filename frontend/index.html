@@ -23,6 +23,50 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Roboto:wght@400;500;700&family=Montserrat:wght@400;600;700&family=Open+Sans:wght@400;600;700&family=Lato:wght@400;700&family=Poppins:wght@400;600;700&family=Raleway:wght@400;600;700&family=Nunito:wght@400;600;700;800&family=Merriweather:wght@400;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 
     <link rel="stylesheet" href="/static/style.css?v=dev">
+
+    <!-- Критический каркас: минимальная геометрия, которая работает даже если
+         style.css не загрузился или в кеше остался старый битый файл. -->
+    <style id="shell-critical">
+        html, body { height: 100%; margin: 0; overflow: hidden; }
+        body { background: #1a1a20; color: #f2f3f5; }
+        .screen { display: none; }
+        #chat-screen.active {
+            display: block !important;
+            position: fixed;
+            inset: 0;
+            height: 100dvh;
+            min-height: 0;
+            overflow: hidden;
+        }
+        #chat-screen .app {
+            display: flex;
+            height: 100%;
+            min-height: 0;
+            overflow: hidden;
+        }
+        #chat-screen .chat-area {
+            flex: 1 1 auto;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+            min-height: 0;
+            height: 100%;
+            overflow: hidden;
+        }
+        #chat-screen .chat-area > .view-pane {
+            flex: 1 1 auto;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            height: 100%;
+        }
+        #chat-screen .messages {
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow-y: auto;
+        }
+    </style>
+    <script src="/static/layout-guard.js?v=dev"></script>
 </head>
 <body>
 
@@ -706,6 +750,8 @@
             <h3>Новый канал</h3>
             <input type="text" id="channel-name-input" placeholder="название-канала" maxlength="32">
             <input type="text" id="channel-topic-input" placeholder="Тема канала (необязательно)" maxlength="120">
+            <input type="text" id="channel-category-input" placeholder="Категория (необязательно, например «Текстовые»)" maxlength="40" list="channel-category-list" autocomplete="off">
+            <datalist id="channel-category-list"></datalist>
             <div class="modal-actions">
                 <button class="modal-btn secondary" data-action="close-channel-modal">Отмена</button>
                 <button class="modal-btn primary" data-action="save-channel">Создать</button>
@@ -878,6 +924,7 @@
     <script src="/static/channels.js?v=dev"></script>
     <script src="/static/calls.js?v=dev"></script>
     <script src="/static/features.js?v=dev"></script>
+    <script src="/static/v13.js?v=dev"></script>
     <script src="/static/pwa.js?v=dev"></script>
 </body>
 </html>

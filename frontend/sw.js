@@ -8,7 +8,7 @@
 //   • API и WebSocket   — только сеть (никакого кеша: приватные данные).
 // ============================================================
 
-const VERSION = "swaptime-v12";
+const VERSION = "swaptime-v13";
 const SHELL = [
   "/",
   "/static/favicon.svg",

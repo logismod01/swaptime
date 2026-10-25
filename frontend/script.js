@@ -817,6 +817,7 @@ function renderDMList() {
 
   // закреплённые сверху, иконки тишины и превью черновика (v12)
   if (typeof decorateChatList === "function") decorateChatList(listEl);
+  if (typeof V13 !== "undefined" && V13.filterDmList) V13.filterDmList(listEl);
 }
 
 function renderRequests() {
@@ -1157,6 +1158,16 @@ function buildMessageNode(msg) {
   }
   textEl.appendChild(textInner);
 
+  if (!msg.deleted && typeof buildAttachmentNode === "function") {
+    const attachment = buildAttachmentNode(msg, "dm");
+    if (attachment) textEl.appendChild(attachment);
+  }
+
+  if (!msg.deleted && typeof buildPollNode === "function") {
+    const poll = buildPollNode(msg, "dm");
+    if (poll) textEl.appendChild(poll);
+  }
+
   if (!msg.deleted && typeof buildReactionsNode === "function") {
     const reactions = buildReactionsNode(msg, "dm");
     if (reactions) textEl.appendChild(reactions);
@@ -1475,7 +1486,11 @@ function sendMessage() {
   }
 
   const input = $("message-input");
-  const text = input.value.trim();
+  // слэш-команды: /spoiler, /me, /shrug, /roll, /poll …
+  const text =
+    typeof V13 !== "undefined" && V13.applySlashText
+      ? V13.applySlashText(input.value.trim(), "dm")
+      : input.value.trim();
   if (!text || !state.current) return;
 
   const clientId = uuid();
@@ -1739,6 +1754,9 @@ function handleSocketMessage(msg) {
     case "presence": onPresence(msg); break;
     case "reaction":
       if (typeof applyReactionEvent === "function") applyReactionEvent(msg);
+      break;
+    case "poll_update":
+      if (typeof applyPollUpdate === "function") applyPollUpdate(msg);
       break;
     case "typing": onTyping(msg); break;
     case "friend_request":
