@@ -1,5 +1,5 @@
 // ============================================================
-// СВАПТАЙМ — FRONTEND (v9, Discord-like)
+// СВАПТАЙМ — FRONTEND (v12, Discord-like)
 // ============================================================
 // Что нового относительно v7:
 //   • своя аватарка (загрузка фото, обрезка в квадрат на клиенте)
@@ -412,6 +412,7 @@ function renderMeBar() {
   $("my-name").textContent = name;
   $("my-tag").textContent = "@" + state.user.username;
   fillAvatarSlot($("me-avatar-slot"), state.user);
+  if (typeof applyMyStatus === "function") applyMyStatus();
 }
 
 // ============================================================
@@ -559,6 +560,7 @@ async function enterApp() {
     state.frames = data.frames && data.frames.length ? data.frames : FALLBACK_FRAMES;
     state.banners = data.banners && data.banners.length ? data.banners : FALLBACK_BANNERS;
     state.themes = data.themes && data.themes.length ? data.themes : FALLBACK_THEMES;
+    state.statuses = data.statuses || ["online", "idle", "dnd", "invisible"];
     localStorage.setItem("swaptime_user", JSON.stringify(state.user));
     applyTheme();
   } catch (err) {
@@ -566,6 +568,7 @@ async function enterApp() {
   }
 
   if (typeof initCallSettings === "function") initCallSettings();
+  if (typeof applyMyStatus === "function") applyMyStatus();
 
   await refreshChats();
   connectWS();
@@ -811,6 +814,9 @@ function renderDMList() {
     empty.appendChild(el("div", "empty-state-hint", "Попробуй другой ник"));
     listEl.appendChild(empty);
   }
+
+  // закреплённые сверху, иконки тишины и превью черновика (v12)
+  if (typeof decorateChatList === "function") decorateChatList(listEl);
 }
 
 function renderRequests() {
@@ -977,8 +983,13 @@ async function openChat(username) {
     } else {
       history.forEach((msg) => appendMessage(msg, false));
       applyGrouping();
+      if (typeof placeUnreadDivider === "function") placeUnreadDivider($("messages"), chat && chat.unread);
     }
-    scrollToBottom();
+    if (typeof restoreDraft === "function") {
+      if (!restoreDraft("dm", username)) scrollToBottom();
+    } else {
+      scrollToBottom();
+    }
   } catch (err) {
     if (state.current !== username) return;
     clear($("messages"));
@@ -989,6 +1000,7 @@ async function openChat(username) {
   markRead(username);
   renderTitle();
   refreshPins();
+  if (typeof onChatOpened === "function") onChatOpened("dm", username);
 
   if (window.matchMedia("(min-width: 761px)").matches) $("message-input").focus();
 }
@@ -1008,13 +1020,19 @@ function updateChatHeader(chat) {
   $("chat-avatar-slot") && fillAvatarSlot($("chat-avatar-slot"), chat, "", { frame: chat.avatar_frame });
 
   const status = $("chat-status");
-  if (chat.online) {
-    status.textContent = "@" + chat.username + " · в сети";
+  const presence = typeof presenceLabel === "function" ? presenceLabel(chat) : "";
+  status.dataset.status = chat.status || "online";
+  if (chat.online && presence) {
+    status.textContent = "@" + chat.username + " · " + presence;
     status.classList.add("online");
+    status.classList.toggle("dnd", chat.status === "dnd");
+    status.classList.toggle("idle", chat.status === "idle");
   } else {
     status.textContent = "@" + chat.username;
-    status.classList.remove("online");
+    status.classList.remove("online", "dnd", "idle");
   }
+  if (typeof syncChatMuteButton === "function") syncChatMuteButton();
+  if (typeof syncChatStatusExtra === "function") syncChatStatusExtra(chat);
 }
 
 function closeChat() {
@@ -1123,14 +1141,26 @@ function buildMessageNode(msg) {
   }
 
   const textEl = el("div", "message " + (isOwn ? "own" : "other"));
+  if (msg.fwd_from) {
+    const fwd = el("div", "fwd-label", "⇄ Переслано от ");
+    fwd.appendChild(el("b", null, msg.fwd_name || ("@" + msg.fwd_from)));
+    textEl.appendChild(fwd);
+  }
   const textInner = el("div", "message-text");
   if (msg.deleted) {
     textInner.classList.add("deleted-text");
     textInner.textContent = "Сообщение удалено";
+  } else if (typeof renderRichText === "function") {
+    renderRichText(textInner, msg.text || "");
   } else {
     textInner.textContent = msg.text || "";
   }
   textEl.appendChild(textInner);
+
+  if (!msg.deleted && typeof buildReactionsNode === "function") {
+    const reactions = buildReactionsNode(msg, "dm");
+    if (reactions) textEl.appendChild(reactions);
+  }
 
   const meta = el("div", "message-meta");
   if (msg.edited && !msg.deleted) meta.appendChild(el("span", "edited-mark", "(изм.)"));
@@ -1165,6 +1195,10 @@ function buildMessageNode(msg) {
       pinBtn.title = msg.pinned ? "Открепить сообщение" : "Закрепить сообщение";
       pinBtn.addEventListener("click", () => togglePinMessage(msg));
       actions.appendChild(pinBtn);
+    }
+
+    if (typeof addMessageExtras === "function") {
+      addMessageExtras(actions, msg, { scope: "dm" });
     }
 
     if (isOwn && msg.id) {
@@ -1473,6 +1507,7 @@ function sendMessage() {
   updateChatFromMessage(optimistic);
 
   input.value = "";
+  if (typeof clearDraft === "function") clearDraft("dm", optimistic.to);
   cancelReply();
   input.focus();
 
@@ -1702,6 +1737,9 @@ function handleSocketMessage(msg) {
     }
     case "read": break;
     case "presence": onPresence(msg); break;
+    case "reaction":
+      if (typeof applyReactionEvent === "function") applyReactionEvent(msg);
+      break;
     case "typing": onTyping(msg); break;
     case "friend_request":
       refreshChats();
@@ -1783,6 +1821,10 @@ function onIncomingMessage(msg) {
 
   updateChatFromMessage(msg);
 
+  if (!isOwn && typeof notifyIncomingMessage === "function") {
+    notifyIncomingMessage(msg, { isCurrent, focused });
+  }
+
   if (!isOwn) {
     const chat = getChat(peer);
     if (chat && (!isCurrent || !focused)) {
@@ -1828,6 +1870,8 @@ function onPresence(msg) {
   const chat = getChat(msg.user);
   if (chat) {
     chat.online = !!msg.online;
+    if (msg.status !== undefined) chat.status = msg.status;
+    if (msg.status_text !== undefined) chat.status_text = msg.status_text;
     if (state.current === msg.user) updateChatHeader(chat);
     renderDMList();
     renderRail();
@@ -1992,15 +2036,18 @@ function renderProfileCard(data) {
   $("profile-username").textContent = "@" + data.username;
 
   const status = $("profile-status");
+  const presence = typeof presenceLabel === "function" ? presenceLabel(data) : (data.online ? "в сети" : "не в сети");
   if (data.is_me) {
     status.textContent = "это ты";
     status.classList.add("online");
   } else if (data.online) {
-    status.textContent = "в сети";
+    status.textContent = presence + (data.status_text ? " · " + data.status_text : "");
     status.classList.add("online");
+    status.classList.toggle("dnd", data.status === "dnd");
+    status.classList.toggle("idle", data.status === "idle");
   } else {
     status.textContent = "не в сети";
-    status.classList.remove("online");
+    status.classList.remove("online", "dnd", "idle");
   }
 
   $("profile-bio").textContent = data.bio || "Пока ничего не рассказал о себе…";
@@ -2179,6 +2226,7 @@ function openSettings(tab = "profile") {
   // приватность
   renderBlockedList();
   renderIgnoredList();
+  if (typeof onSettingsOpened === "function") onSettingsOpened();
 
   switchSettingsTab(tab);
   $("settings-modal").classList.add("active");
@@ -2469,6 +2517,8 @@ async function saveSettings() {
       },
     });
     applyUserUpdate(data.user);
+    if (typeof savePresenceFromSettings === "function") await savePresenceFromSettings();
+    if (typeof saveNotifySettings === "function") saveNotifySettings();
     applyTheme();
     closeSettings();
     await refreshChats();
@@ -2826,6 +2876,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     state.frames = data.frames && data.frames.length ? data.frames : FALLBACK_FRAMES;
     state.banners = data.banners && data.banners.length ? data.banners : FALLBACK_BANNERS;
     state.themes = data.themes && data.themes.length ? data.themes : FALLBACK_THEMES;
+    state.statuses = data.statuses || ["online", "idle", "dnd", "invisible"];
     localStorage.setItem("swaptime_user", JSON.stringify(state.user));
     enterApp();
   } catch (err) {

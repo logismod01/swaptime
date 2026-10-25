@@ -1,5 +1,5 @@
 # ============================================
-# СВАПТАЙМ — BACKEND (v7)
+# СВАПТАЙМ — BACKEND (v12)
 # ============================================
 # Что изменилось по сравнению с v6:
 #   • токены реально проверяются (раньше можно было менять чужой профиль)
@@ -103,6 +103,22 @@ FONTS = [
 ]
 
 
+# Presence: как в Discord — в сети / отошёл / не беспокоить / невидимка
+STATUSES = ["online", "idle", "dnd", "invisible"]
+STATUS_TEXT_MAX = 60
+STATUS_LABELS = {
+    "online": "В сети",
+    "idle": "Отошёл",
+    "dnd": "Не беспокоить",
+    "invisible": "Невидимка",
+    "offline": "Не в сети",
+}
+
+
+def normalize_status(value: Optional[str]) -> str:
+    return value if value in STATUSES else "online"
+
+
 # ============================================
 # БАЗА ДАННЫХ
 # ============================================
@@ -152,6 +168,18 @@ def init_db() -> None:
             deleted INTEGER DEFAULT 0,
             client_id TEXT,
             created_at INTEGER NOT NULL
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS reactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope TEXT NOT NULL,
+            message_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            emoji TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            UNIQUE(scope, message_id, username, emoji)
         )
     """)
 
@@ -316,10 +344,14 @@ def init_db() -> None:
     _add_column(c, "users", "banner", "TEXT DEFAULT 'crimson'")
     _add_column(c, "users", "bio", "TEXT DEFAULT ''")
     _add_column(c, "users", "theme", "TEXT DEFAULT 'midnight'")
+    _add_column(c, "users", "status", "TEXT DEFAULT 'online'")
+    _add_column(c, "users", "status_text", "TEXT DEFAULT ''")
     _add_column(c, "messages", "client_id", "TEXT")
     _add_column(c, "messages", "pinned", "INTEGER DEFAULT 0")
     _add_column(c, "messages", "pinned_by", "TEXT DEFAULT ''")
     _add_column(c, "messages", "pinned_at", "INTEGER DEFAULT 0")
+    _add_column(c, "messages", "fwd_from", "TEXT DEFAULT ''")
+    _add_column(c, "messages", "fwd_name", "TEXT DEFAULT ''")
     _add_column(c, "server_messages", "pinned", "INTEGER DEFAULT 0")
     _add_column(c, "server_messages", "pinned_by", "TEXT DEFAULT ''")
     _add_column(c, "server_messages", "pinned_at", "INTEGER DEFAULT 0")
@@ -328,6 +360,7 @@ def init_db() -> None:
     c.execute("CREATE INDEX IF NOT EXISTS idx_msg_to ON messages(to_user, id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_msg_client ON messages(client_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_friends_user ON friends(user1, user2, status)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_reactions_msg ON reactions(scope, message_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_srv_msg ON server_messages(channel_id, id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_srv_members ON server_members(server_id, username)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_tg_posts ON tg_posts(channel_id, id)")
@@ -395,7 +428,7 @@ def get_user(username: str) -> Optional[dict]:
     conn = db_connect()
     row = conn.execute(
         "SELECT id, username, display_name, avatar_color, font_family, last_seen, "
-        "avatar, avatar_frame, banner, bio, theme, created_at "
+        "avatar, avatar_frame, banner, bio, theme, status, status_text, created_at "
         "FROM users WHERE username = ?",
         (username,),
     ).fetchone()
@@ -416,6 +449,8 @@ def get_user(username: str) -> Optional[dict]:
         "theme": row["theme"] if row["theme"] in THEMES else THEMES[0],
         "font_family": normalize_font(row["font_family"] or FONTS[0]),
         "last_seen": row["last_seen"] or 0,
+        "status": normalize_status(row["status"]),
+        "status_text": row["status_text"] or "",
         "created_at": row["created_at"] or 0,
     }
 
@@ -439,6 +474,8 @@ def short_profile(user: dict) -> dict:
         "avatar_ver": user["avatar_ver"],
         "avatar_frame": user["avatar_frame"],
         "online": user["username"] in active_connections,
+        "status": user.get("status") or "online",
+        "status_text": user.get("status_text") or "",
     }
 
 
@@ -561,6 +598,17 @@ class MarkRead(BaseModel):
     from_user: Optional[str] = None  # игнорируется
 
 
+class PresenceIn(BaseModel):
+    status: Optional[str] = None
+    status_text: Optional[str] = None
+
+
+class ReactionIn(BaseModel):
+    scope: str = "dm"            # 'dm' | 'channel'
+    message_id: int
+    emoji: str
+
+
 # ============================================
 # ДРУЗЬЯ / СВЯЗИ
 # ============================================
@@ -674,13 +722,58 @@ def mark_read(username: str, chat_with: str) -> int:
 # ============================================
 MSG_COLUMNS = (
     "id, from_user, to_user, text, reply_to, edited, deleted, client_id, created_at, "
-    "pinned, pinned_by, pinned_at"
+    "pinned, pinned_by, pinned_at, fwd_from, fwd_name"
 )
 
 SRV_MSG_COLUMNS = (
     "id, channel_id, from_user, text, edited, deleted, client_id, created_at, "
     "pinned, pinned_by, pinned_at"
 )
+
+
+REACTION_EMOJI_MAX = 16
+
+
+def _reactions_map(conn: sqlite3.Connection, scope: str, ids) -> Dict[int, list]:
+    """Реакции для набора сообщений: {message_id: [{emoji, count, users}]}."""
+    ids = [int(i) for i in ids if i]
+    if not ids:
+        return {}
+    placeholders = ",".join("?" * len(ids))
+    rows = conn.execute(
+        f"SELECT message_id, emoji, username FROM reactions "
+        f"WHERE scope = ? AND message_id IN ({placeholders}) ORDER BY id",
+        (scope, *ids),
+    ).fetchall()
+
+    grouped: Dict[int, Dict[str, list]] = {}
+    for r in rows:
+        grouped.setdefault(r["message_id"], {}).setdefault(r["emoji"], []).append(r["username"])
+
+    return {
+        mid: [{"emoji": e, "count": len(users), "users": users} for e, users in per.items()]
+        for mid, per in grouped.items()
+    }
+
+
+def _toggle_reaction(scope: str, message_id: int, username: str, emoji: str) -> list:
+    """Ставит/снимает реакцию и возвращает актуальный список для сообщения."""
+    conn = db_connect()
+    existing = conn.execute(
+        "SELECT id FROM reactions WHERE scope = ? AND message_id = ? AND username = ? AND emoji = ?",
+        (scope, message_id, username, emoji),
+    ).fetchone()
+    if existing:
+        conn.execute("DELETE FROM reactions WHERE id = ?", (existing["id"],))
+    else:
+        conn.execute(
+            "INSERT INTO reactions (scope, message_id, username, emoji, created_at) VALUES (?, ?, ?, ?, ?)",
+            (scope, message_id, username, emoji, int(time.time())),
+        )
+    conn.commit()
+    data = _reactions_map(conn, scope, [message_id]).get(message_id, [])
+    conn.close()
+    return data
 
 
 def _replies_map(conn: sqlite3.Connection, ids) -> Dict[int, dict]:
@@ -703,9 +796,10 @@ def _replies_map(conn: sqlite3.Connection, ids) -> Dict[int, dict]:
     }
 
 
-def message_dict(row: sqlite3.Row, replies: Dict[int, dict]) -> dict:
+def message_dict(row: sqlite3.Row, replies: Dict[int, dict], reactions: Optional[dict] = None) -> dict:
     reply_to = row["reply_to"] or 0
     return {
+        "reactions": (reactions or {}).get(row["id"], []),
         "id": row["id"],
         "client_id": row["client_id"],
         "from": row["from_user"],
@@ -719,6 +813,8 @@ def message_dict(row: sqlite3.Row, replies: Dict[int, dict]) -> dict:
         "pinned": bool(row["pinned"]),
         "pinned_by": row["pinned_by"] or "",
         "pinned_at": row["pinned_at"] or 0,
+        "fwd_from": (row["fwd_from"] or "") if "fwd_from" in row.keys() else "",
+        "fwd_name": (row["fwd_name"] or "") if "fwd_name" in row.keys() else "",
     }
 
 
@@ -728,7 +824,11 @@ def fetch_message(conn: sqlite3.Connection, message_id: int) -> Optional[dict]:
     ).fetchone()
     if not row:
         return None
-    return message_dict(row, _replies_map(conn, [row["reply_to"]]))
+    return message_dict(
+        row,
+        _replies_map(conn, [row["reply_to"]]),
+        _reactions_map(conn, "dm", [row["id"]]),
+    )
 
 
 def messages_between(conn: sqlite3.Connection, me: str, other: str, limit: int) -> list:
@@ -742,7 +842,8 @@ def messages_between(conn: sqlite3.Connection, me: str, other: str, limit: int) 
     ).fetchall()
     rows = list(reversed(rows))
     replies = _replies_map(conn, [r["reply_to"] for r in rows])
-    return [message_dict(r, replies) for r in rows]
+    reactions = _reactions_map(conn, "dm", [r["id"] for r in rows])
+    return [message_dict(r, replies, reactions) for r in rows]
 
 
 # ============================================
@@ -858,6 +959,7 @@ async def me(user: str = Depends(auth_user)):
         "frames": FRAMES,
         "banners": BANNERS,
         "themes": THEMES,
+        "statuses": STATUSES,
     }
 
 
@@ -1000,6 +1102,75 @@ async def get_settings(user: str = Depends(auth_user)):
         "banners": BANNERS,
         "themes": THEMES,
     }
+
+
+@app.post("/api/presence")
+async def set_presence(data: PresenceIn, user: str = Depends(auth_user)):
+    """Статус как в Discord: в сети / отошёл / не беспокоить / невидимка + текст."""
+    current = get_user(user)
+    if not current:
+        raise HTTPException(401, "Юзер не найден")
+
+    status = normalize_status(data.status) if data.status is not None else current["status"]
+    text = current["status_text"]
+    if data.status_text is not None:
+        text = " ".join((data.status_text or "").split())[:STATUS_TEXT_MAX]
+
+    conn = db_connect()
+    conn.execute("UPDATE users SET status = ?, status_text = ? WHERE username = ?", (status, text, user))
+    conn.commit()
+    conn.close()
+
+    await _broadcast_presence_full(user)
+    return {"ok": True, "status": status, "status_text": text, "statuses": STATUSES}
+
+
+# ============================================
+# API — РЕАКЦИИ
+# ============================================
+@app.post("/api/reactions")
+async def toggle_reaction(data: ReactionIn, user: str = Depends(auth_user)):
+    """Поставить/снять эмодзи-реакцию (REST-путь; в реальном времени — через WS)."""
+    emoji = (data.emoji or "").strip()[:REACTION_EMOJI_MAX]
+    if not emoji:
+        raise HTTPException(400, "Пустая реакция")
+
+    if data.scope == "channel":
+        conn = db_connect()
+        row = conn.execute(
+            "SELECT m.channel_id, c.server_id FROM server_messages m "
+            "JOIN server_channels c ON c.id = m.channel_id WHERE m.id = ?",
+            (data.message_id,),
+        ).fetchone()
+        conn.close()
+        if not row:
+            raise HTTPException(404, "Сообщение не найдено")
+        if not server_role(row["server_id"], user):
+            raise HTTPException(403, "Ты не участник этого сервера")
+        reactions = _toggle_reaction("channel", data.message_id, user, emoji)
+        await broadcast_to_server(row["server_id"], {
+            "type": "reaction", "scope": "channel", "channel_id": row["channel_id"],
+            "message_id": data.message_id, "reactions": reactions,
+        })
+        return {"ok": True, "reactions": reactions}
+
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT from_user, to_user, deleted FROM messages WHERE id = ?", (data.message_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(404, "Сообщение не найдено")
+    if user not in (row["from_user"], row["to_user"]):
+        raise HTTPException(403, "Это чужой чат")
+    if row["deleted"]:
+        raise HTTPException(400, "Сообщение удалено")
+
+    reactions = _toggle_reaction("dm", data.message_id, user, emoji)
+    payload = {"type": "reaction", "scope": "dm", "message_id": data.message_id, "reactions": reactions}
+    await send_to_user(row["from_user"], payload)
+    await send_to_user(row["to_user"], payload)
+    return {"ok": True, "reactions": reactions}
 
 
 # ============================================
@@ -1438,6 +1609,19 @@ def server_member_names(server_id: int) -> list:
 
 def can_manage_server(server_id: int, username: str) -> bool:
     return server_role(server_id, username) in ("owner", "admin")
+
+
+def server_mates(username: str) -> list:
+    """Все, кто состоит с пользователем хоть в одном сервере (для статусов)."""
+    conn = db_connect()
+    rows = conn.execute(
+        "SELECT DISTINCT m2.username FROM server_members m1 "
+        "JOIN server_members m2 ON m2.server_id = m1.server_id "
+        "WHERE m1.username = ? AND m2.username != ?",
+        (username, username),
+    ).fetchall()
+    conn.close()
+    return [r["username"] for r in rows]
 
 
 def same_server(a: str, b: str) -> bool:
@@ -1891,7 +2075,9 @@ async def delete_server_channel(server_id: int, channel_id: int, user: str = Dep
 
 
 def _server_message_dict(row: sqlite3.Row, conn: sqlite3.Connection) -> dict:
+    reactions = _reactions_map(conn, "channel", [row["id"]]).get(row["id"], [])
     return {
+        "reactions": reactions,
         "id": row["id"],
         "channel_id": row["channel_id"],
         "from": row["from_user"],
@@ -1903,6 +2089,8 @@ def _server_message_dict(row: sqlite3.Row, conn: sqlite3.Connection) -> dict:
         "pinned": bool(row["pinned"]),
         "pinned_by": row["pinned_by"] or "",
         "pinned_at": row["pinned_at"] or 0,
+        "fwd_from": (row["fwd_from"] or "") if "fwd_from" in row.keys() else "",
+        "fwd_name": (row["fwd_name"] or "") if "fwd_name" in row.keys() else "",
     }
 
 
@@ -2558,15 +2746,40 @@ async def _notify_friends_changed(a: str, b: str) -> None:
 
 
 async def _broadcast_presence(username: str, online: bool) -> None:
-    await broadcast_to_friends(
-        username, {"type": "presence", "user": username, "online": online}
-    )
+    await _broadcast_presence_full(username, online)
+
+
+async def _broadcast_presence_full(username: str, online: Optional[bool] = None) -> None:
+    """Статус + текст статуса — друзьям, участникам общих серверов и своим вкладкам."""
+    info = get_user(username)
+    if not info:
+        return
+    is_online = (username in active_connections) if online is None else online
+    status = info["status"] if is_online else "offline"
+    payload = {
+        "type": "presence",
+        "user": username,
+        "online": is_online,
+        "status": status,
+        "status_text": info["status_text"],
+    }
+    for peer in set(friend_usernames(username)) | set(server_mates(username)):
+        await send_to_user(peer, payload)
+    await send_to_user(username, payload)
 
 
 # ============================================
 # WEBSOCKET — ОБРАБОТКА
 # ============================================
-def _save_message(sender: str, to_user: str, text: str, client_id: Optional[str], reply_to: int):
+def _save_message(
+    sender: str,
+    to_user: str,
+    text: str,
+    client_id: Optional[str],
+    reply_to: int,
+    fwd_from: str = "",
+    fwd_name: str = "",
+):
     conn = db_connect()
     # ответ на сообщение должен существовать и относиться к этому же диалогу
     if reply_to:
@@ -2590,9 +2803,9 @@ def _save_message(sender: str, to_user: str, text: str, client_id: Optional[str]
             return msg, False
 
     cur = conn.execute(
-        "INSERT INTO messages (from_user, to_user, text, reply_to, client_id, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (sender, to_user, text, reply_to, client_id, int(time.time())),
+        "INSERT INTO messages (from_user, to_user, text, reply_to, client_id, created_at, "
+        "fwd_from, fwd_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (sender, to_user, text, reply_to, client_id, int(time.time()), fwd_from, fwd_name),
     )
     msg_id = cur.lastrowid
     conn.commit()
@@ -2664,7 +2877,16 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(defa
                     }, ensure_ascii=False))
                     continue
 
-                saved, is_new = _save_message(username, to_user, text, client_id, reply_to)
+                fwd_from = str(msg.get("fwd_from", "") or "").strip().lower()[:20]
+                fwd_name = " ".join(str(msg.get("fwd_name", "") or "").split())[:40]
+                if fwd_from and not user_exists(fwd_from):
+                    fwd_from, fwd_name = "", ""
+                if not fwd_from:
+                    fwd_name = ""
+
+                saved, is_new = _save_message(
+                    username, to_user, text, client_id, reply_to, fwd_from, fwd_name
+                )
                 if not saved:
                     continue
 
@@ -2791,6 +3013,44 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(defa
                 payload = {"type": "pin_changed", "message": updated}
                 await send_to_user(updated["from"], payload)
                 await send_to_user(updated["to"], payload)
+
+            # ---------- РЕАКЦИИ ----------
+            elif msg_type == "reaction":
+                scope = "channel" if msg.get("scope") == "channel" else "dm"
+                emoji = str(msg.get("emoji", "")).strip()[:REACTION_EMOJI_MAX]
+                try:
+                    mid = int(msg.get("id"))
+                except (TypeError, ValueError):
+                    continue
+                if not emoji:
+                    continue
+
+                conn = db_connect()
+                if scope == "channel":
+                    row = conn.execute(
+                        "SELECT m.channel_id, m.deleted, c.server_id FROM server_messages m "
+                        "JOIN server_channels c ON c.id = m.channel_id WHERE m.id = ?",
+                        (mid,),
+                    ).fetchone()
+                    conn.close()
+                    if not row or row["deleted"] or not server_role(row["server_id"], username):
+                        continue
+                    reactions = _toggle_reaction("channel", mid, username, emoji)
+                    await broadcast_to_server(row["server_id"], {
+                        "type": "reaction", "scope": "channel", "channel_id": row["channel_id"],
+                        "message_id": mid, "reactions": reactions,
+                    })
+                else:
+                    row = conn.execute(
+                        "SELECT from_user, to_user, deleted FROM messages WHERE id = ?", (mid,)
+                    ).fetchone()
+                    conn.close()
+                    if not row or row["deleted"] or username not in (row["from_user"], row["to_user"]):
+                        continue
+                    reactions = _toggle_reaction("dm", mid, username, emoji)
+                    payload = {"type": "reaction", "scope": "dm", "message_id": mid, "reactions": reactions}
+                    await send_to_user(row["from_user"], payload)
+                    await send_to_user(row["to_user"], payload)
 
             # ---------- ПРОЧИТАНО ----------
             elif msg_type == "read":
@@ -3070,11 +3330,40 @@ async def websocket_chat(websocket: WebSocket, token: Optional[str] = Query(defa
 FRONTEND_PATH = BASE_DIR / "frontend"
 
 
+def _compute_asset_version() -> str:
+    """Хеш фронтенда — попадает в ссылки (?v=...), чтобы браузер не держал старый CSS."""
+    digest = hashlib.md5()
+    if FRONTEND_PATH.exists():
+        files = sorted(FRONTEND_PATH.glob("*.js")) + sorted(FRONTEND_PATH.glob("*.css"))
+        for path in files:
+            try:
+                digest.update(path.name.encode())
+                digest.update(path.read_bytes())
+            except OSError:
+                continue
+    return digest.hexdigest()[:12]
+
+
+ASSET_VERSION = _compute_asset_version()
+
+
+@app.middleware("http")
+async def no_cache_for_static(request, call_next):
+    """style.css/script.js всегда ревалидируются — иначе правки не доезжают до людей."""
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 @app.get("/")
 async def root():
     # index.html не кешируем, иначе после обновления остаётся старый script.js
-    return FileResponse(
-        FRONTEND_PATH / "index.html",
+    html = (FRONTEND_PATH / "index.html").read_text(encoding="utf-8")
+    html = html.replace("?v=dev", "?v=" + ASSET_VERSION)
+    return Response(
+        content=html,
+        media_type="text/html",
         headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
     )
 

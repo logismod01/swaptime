@@ -22,7 +22,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Roboto:wght@400;500;700&family=Montserrat:wght@400;600;700&family=Open+Sans:wght@400;600;700&family=Lato:wght@400;700&family=Poppins:wght@400;600;700&family=Raleway:wght@400;600;700&family=Nunito:wght@400;600;700;800&family=Merriweather:wght@400;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 
-    <link rel="stylesheet" href="/static/style.css?v=10">
+    <link rel="stylesheet" href="/static/style.css?v=dev">
 </head>
 <body>
 
@@ -120,6 +120,10 @@
                 </div>
 
                 <div class="rail-bottom">
+                    <button class="rail-btn rail-small" data-action="open-favorites" title="Избранное" aria-label="Избранное">
+                        🔖<span class="rail-badge" id="fav-badge" hidden></span>
+                    </button>
+                    <button class="rail-btn rail-small" data-action="quick-switch" title="Быстрый переход (Ctrl+K)" aria-label="Быстрый переход">⌕</button>
                     <button class="rail-btn rail-small" data-action="open-settings" title="Настройки" aria-label="Настройки">⚙</button>
                     <button class="rail-btn rail-small" data-action="logout" title="Выйти" aria-label="Выйти">⏻</button>
                 </div>
@@ -243,6 +247,8 @@
                                 </span>
                             </button>
                             <div class="chat-header-actions">
+                                <button class="icon-btn" data-action="open-chat-search" title="Поиск по чату (Ctrl+F)">🔍</button>
+                                <button class="icon-btn" id="chat-mute-btn" data-action="toggle-chat-mute" title="Уведомления">🔔</button>
                                 <button class="icon-btn call-btn" data-action="start-audio-call" title="Аудиозвонок">📞</button>
                                 <button class="icon-btn call-btn" data-action="start-video-call" title="Видеозвонок">🎥</button>
                                 <button class="icon-btn" data-action="chat-profile" title="Профиль">👤</button>
@@ -257,6 +263,14 @@
                             </button>
                         </div>
                         <div class="pins-popover" id="pins-popover"></div>
+
+                        <div class="chat-search" id="chat-search" style="display:none;">
+                            <input type="search" id="chat-search-input" placeholder="Поиск по сообщениям…" maxlength="200" autocomplete="off">
+                            <span class="chat-search-count" id="chat-search-count">0/0</span>
+                            <button class="icon-btn" data-action="search-prev" title="Раньше">↑</button>
+                            <button class="icon-btn" data-action="search-next" title="Позже">↓</button>
+                            <button class="icon-btn" data-action="close-chat-search" title="Закрыть">✕</button>
+                        </div>
 
                         <div class="messages" id="messages"></div>
 
@@ -278,11 +292,24 @@
                             <button class="banner-close" data-action="cancel-edit" aria-label="Отменить">✕</button>
                         </div>
 
+                        <div class="format-bar" id="format-bar" style="display:none;">
+                            <button class="fmt-btn" data-format="bold" title="Жирный (Ctrl+B)"><b>B</b></button>
+                            <button class="fmt-btn" data-format="italic" title="Курсив (Ctrl+I)"><i>I</i></button>
+                            <button class="fmt-btn" data-format="strike" title="Зачёркнутый"><s>S</s></button>
+                            <button class="fmt-btn" data-format="code" title="Код">`</button>
+                            <button class="fmt-btn" data-format="spoiler" title="Спойлер">👁</button>
+                            <span class="format-hint">**жирный** *курсив* ~~зачёркнутый~~ `код` ||спойлер||</span>
+                        </div>
+
                         <footer class="chat-input">
-                            <button class="composer-plus" data-action="open-settings" title="Настройки">＋</button>
+                            <button class="composer-plus" data-action="toggle-format" title="Форматирование текста">Aa</button>
                             <input type="text" id="message-input" placeholder="Написать в @…" autocomplete="off" maxlength="4000">
                             <button class="send-btn" id="send-btn" aria-label="Отправить">➤</button>
                         </footer>
+
+                        <button class="jump-bottom" id="jump-bottom" data-action="jump-bottom" style="display:none;">
+                            ↓ <span id="jump-count">0</span>
+                        </button>
                     </div>
                 </div>
 
@@ -317,6 +344,8 @@
                             <div class="chat-status" id="server-channel-topic">—</div>
                         </div>
                         <div class="chat-header-actions">
+                            <button class="icon-btn" data-action="open-channel-search" title="Поиск по каналу (Ctrl+F)">🔍</button>
+                            <button class="icon-btn" id="channel-mute-btn" data-action="toggle-channel-mute" title="Уведомления">🔔</button>
                             <button class="icon-btn" data-action="toggle-members" title="Участники">👥</button>
                             <button class="icon-btn" data-action="server-menu" title="Меню сервера">☰</button>
                         </div>
@@ -331,14 +360,34 @@
                     </div>
                     <div class="pins-popover" id="server-pins-popover"></div>
 
+                    <div class="chat-search" id="channel-search" style="display:none;">
+                        <input type="search" id="channel-search-input" placeholder="Поиск по каналу…" maxlength="200" autocomplete="off">
+                        <span class="chat-search-count" id="channel-search-count">0/0</span>
+                        <button class="icon-btn" data-action="search-prev" title="Раньше">↑</button>
+                        <button class="icon-btn" data-action="search-next" title="Позже">↓</button>
+                        <button class="icon-btn" data-action="close-chat-search" title="Закрыть">✕</button>
+                    </div>
+
                     <div class="messages" id="server-messages"></div>
                     <div class="typing-line" id="server-typing" style="display:none;">печатает…</div>
 
+                    <div class="format-bar" id="server-format-bar" style="display:none;">
+                        <button class="fmt-btn" data-format="bold" data-target="server"><b>B</b></button>
+                        <button class="fmt-btn" data-format="italic" data-target="server"><i>I</i></button>
+                        <button class="fmt-btn" data-format="strike" data-target="server"><s>S</s></button>
+                        <button class="fmt-btn" data-format="code" data-target="server">`</button>
+                        <button class="fmt-btn" data-format="spoiler" data-target="server">👁</button>
+                    </div>
+
                     <footer class="chat-input">
-                        <button class="composer-plus" data-action="server-menu" title="Меню">＋</button>
+                        <button class="composer-plus" data-action="toggle-server-format" title="Форматирование текста">Aa</button>
                         <input type="text" id="server-input" placeholder="Написать в #канал" autocomplete="off" maxlength="4000">
                         <button class="send-btn" id="server-send-btn" aria-label="Отправить">➤</button>
                     </footer>
+
+                    <button class="jump-bottom" id="server-jump-bottom" data-action="server-jump-bottom" style="display:none;">
+                        ↓ <span id="server-jump-count">0</span>
+                    </button>
                 </div>
             </main>
 
@@ -414,6 +463,7 @@
                 <button class="settings-tab active" data-tab="profile">👤 Мой профиль</button>
                 <button class="settings-tab" data-tab="appearance">🎨 Внешний вид</button>
                 <button class="settings-tab" data-tab="calls">📞 Звонки</button>
+                <button class="settings-tab" data-tab="notify">🔔 Уведомления</button>
                 <button class="settings-tab" data-tab="privacy">🛡 Приватность</button>
                 <div class="settings-nav-foot">
                     <button class="modal-btn secondary" data-action="close-settings">Закрыть (Esc)</button>
@@ -448,6 +498,12 @@
                     <div class="settings-section">
                         <div class="settings-label">Баннер профиля</div>
                         <div class="banners-grid" id="banners-grid"></div>
+                    </div>
+
+                    <div class="settings-section">
+                        <div class="settings-label">Статус <em>как в Discord</em></div>
+                        <div class="status-row" id="status-row"></div>
+                        <input type="text" id="settings-status-text" placeholder="Что происходит? (необязательно)" maxlength="60">
                     </div>
 
                     <div class="settings-section">
@@ -541,6 +597,22 @@
                         <label class="toggle-row"><input type="checkbox" id="call-stats-toggle" checked> Показывать статистику</label>
                     </div>
                     <div class="settings-hint" id="call-support-hint"></div>
+                </section>
+
+                <!-- УВЕДОМЛЕНИЯ -->
+                <section class="settings-pane" id="settings-tab-notify">
+                    <div class="settings-section">
+                        <div class="settings-label">Уведомления на рабочем столе</div>
+                        <label class="toggle-row"><input type="checkbox" id="notify-desktop"> Показывать, когда окно свёрнуто</label>
+                        <label class="toggle-row"><input type="checkbox" id="notify-sound" checked> Звук нового сообщения</label>
+                        <label class="toggle-row"><input type="checkbox" id="notify-preview" checked> Показывать текст сообщения</label>
+                        <div class="settings-hint" id="notify-hint">Разрешение спрашивается один раз — при первом включении.</div>
+                    </div>
+                    <div class="settings-section">
+                        <div class="settings-label">Тихие чаты</div>
+                        <div class="settings-hint">Чаты и каналы, для которых уведомления выключены кнопкой 🔔 в шапке.</div>
+                        <div class="mute-list" id="mute-list"></div>
+                    </div>
                 </section>
 
                 <!-- ПРИВАТНОСТЬ -->
@@ -756,12 +828,56 @@
         </div>
     </div>
 
+    <!-- ============================================
+         МОДАЛКА: ИЗБРАННОЕ (saved messages)
+         ============================================ -->
+    <div id="favorites-modal" class="modal-overlay">
+        <div class="modal-box favorites-box">
+            <h3>🔖 Избранное</h3>
+            <p class="modal-hint">Сохраняй сообщения кнопкой 🔖 — они останутся здесь, даже если чат удалён.</p>
+            <input type="search" id="favorites-search" placeholder="Найти в избранном…" autocomplete="off">
+            <div class="favorites-list" id="favorites-list"></div>
+            <div class="modal-actions">
+                <button class="modal-btn danger" data-action="clear-favorites">Очистить</button>
+                <button class="modal-btn secondary" data-action="close-favorites">Закрыть</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================
+         БЫСТРЫЙ ПЕРЕХОД (Ctrl+K)
+         ============================================ -->
+    <div id="quick-switch" class="modal-overlay">
+        <div class="quick-switch-box">
+            <input type="search" id="quick-switch-input" placeholder="Куда перейти? чат, сервер, канал…" autocomplete="off">
+            <div class="quick-switch-list" id="quick-switch-list"></div>
+            <div class="quick-switch-hint">↑ ↓ — выбор · Enter — открыть · Esc — закрыть</div>
+        </div>
+    </div>
+
+    <!-- ============================================
+         МОДАЛКА: ПЕРЕСЛАТЬ СООБЩЕНИЕ
+         ============================================ -->
+    <div id="forward-modal" class="modal-overlay">
+        <div class="modal-box">
+            <h3>⇄ Переслать</h3>
+            <p class="modal-hint" id="forward-preview">—</p>
+            <input type="search" id="forward-search" placeholder="Кому переслать?" autocomplete="off">
+            <div class="forward-list" id="forward-list"></div>
+            <div class="modal-actions">
+                <button class="modal-btn secondary" data-action="close-forward">Отмена</button>
+            </div>
+            <div class="modal-error" id="forward-error"></div>
+        </div>
+    </div>
+
     <div class="toast-container" id="toast-container"></div>
 
-    <script src="/static/script.js?v=10"></script>
-    <script src="/static/servers.js?v=10"></script>
-    <script src="/static/channels.js?v=10"></script>
-    <script src="/static/calls.js?v=10"></script>
-    <script src="/static/pwa.js?v=10"></script>
+    <script src="/static/script.js?v=dev"></script>
+    <script src="/static/servers.js?v=dev"></script>
+    <script src="/static/channels.js?v=dev"></script>
+    <script src="/static/calls.js?v=dev"></script>
+    <script src="/static/features.js?v=dev"></script>
+    <script src="/static/pwa.js?v=dev"></script>
 </body>
 </html>

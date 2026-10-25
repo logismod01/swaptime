@@ -143,11 +143,18 @@ async function openServerChannel(channelId) {
     } else {
       messages.forEach((msg) => appendServerMessage(msg, false));
       groupServerMessages();
+      if (typeof placeUnreadDivider === "function") {
+        placeUnreadDivider(box, channel.unread);
+      }
     }
     box.scrollTop = box.scrollHeight;
+    if (typeof restoreDraft === "function" && restoreDraft("channel", String(channelId))) {
+      box.scrollTop = box.scrollHeight;
+    }
 
     api(`/api/servers/${state.activeServer}/channels/${channelId}/read`, { method: "POST" }).catch(() => {});
     refreshServerPins();
+    if (typeof onChatOpened === "function") onChatOpened("channel", String(channelId));
     channel.unread = 0;
     renderServerChannels();
     updateServerUnreadInRail();
@@ -202,10 +209,17 @@ function buildServerMessageNode(msg) {
   if (msg.deleted) {
     textInner.classList.add("deleted-text");
     textInner.textContent = "Сообщение удалено";
+  } else if (typeof renderRichText === "function") {
+    renderRichText(textInner, msg.text || "");
   } else {
     textInner.textContent = msg.text || "";
   }
   textEl.appendChild(textInner);
+
+  if (!msg.deleted && typeof buildReactionsNode === "function") {
+    const reactions = buildReactionsNode(msg, "channel");
+    if (reactions) textEl.appendChild(reactions);
+  }
   if (msg.edited && !msg.deleted) {
     const meta = el("div", "message-meta");
     meta.appendChild(el("span", "edited-mark", "(изм.)"));
@@ -222,6 +236,10 @@ function buildServerMessageNode(msg) {
     pinBtn.title = msg.pinned ? "Открепить сообщение" : "Закрепить сообщение";
     pinBtn.addEventListener("click", () => toggleServerPin(msg));
     actions.appendChild(pinBtn);
+
+    if (typeof addMessageExtras === "function") {
+      addMessageExtras(actions, msg, { scope: "channel" });
+    }
 
     const copyBtn = el("button", "msg-btn", "⧉");
     copyBtn.title = "Скопировать";
@@ -852,6 +870,9 @@ function handleServerEvent(msg) {
     }
 
     case "server_message_updated": {
+      // реакции приходят отдельным событием, сохраняем их при перерисовке
+      const prev = (serverMessages || []).find((m) => m.id === msg.message.id);
+      if (prev && prev.reactions && !msg.message.reactions) msg.message.reactions = prev.reactions;
       if (msg.server_id === state.activeServer && msg.channel_id === state.activeChannel) {
         upsertServerMessage(msg);
       }

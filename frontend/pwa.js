@@ -86,18 +86,30 @@ function initPwa() {
       navigator.serviceWorker
         .register("/sw.js", { scope: "/" })
         .then((registration) => {
+          // проверяем обновления при каждом запуске
+          registration.update().catch(() => {});
+
           registration.addEventListener("updatefound", () => {
             const worker = registration.installing;
             if (!worker) return;
             worker.addEventListener("statechange", () => {
-              if (worker.state === "installed" && navigator.serviceWorker.controller) {
-                // новая версия готова — мягко сообщаем
-                toast("Доступно обновление — перезапусти приложение", "info", 4000);
+              if (worker.state !== "installed") return;
+              // сразу активируем новую версию и один раз перезагружаем страницу,
+              // чтобы человек не сидел со старым CSS
+              worker.postMessage("skip-waiting");
+              if (navigator.serviceWorker.controller && !sessionStorage.getItem("swaptime_reloaded")) {
+                sessionStorage.setItem("swaptime_reloaded", "1");
+                window.location.reload();
               }
             });
           });
         })
         .catch(() => {});
+
+      // если новая версия уже ждёт — активируем
+      navigator.serviceWorker.getRegistration().then((registration) => {
+        if (registration && registration.waiting) registration.waiting.postMessage("skip-waiting");
+      });
     });
   }
 }
