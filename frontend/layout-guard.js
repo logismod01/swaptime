@@ -18,7 +18,7 @@
 (function () {
     "use strict";
 
-    const CACHE_VERSION = "swaptime-v13";
+    const CACHE_VERSION = "swaptime-v13.1";
     const REPAIR_KEY = "swaptime_css_repaired_at";
 
     // ---------- 1. Убираем старые кеши (даже если активен старый SW) ----------
