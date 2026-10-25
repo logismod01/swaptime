@@ -1,4 +1,4 @@
-// Тесты v10: темы, серверы (Discord), каналы (Telegram), звонки
+// Тесты v10: темы, серверы с каналами, каналы-ленты, звонки
 // Требуется: npm install jsdom
 const fs = require("fs");
 const path = require("path");
@@ -356,7 +356,7 @@ async function run() {
   const bobRow = Array.from(rows).find((r) => r.textContent.includes("Боб"));
   assert(bobRow.querySelectorAll(".member-action.danger").length === 1, "кнопка исключения");
 
-  // ---------- каналы (Telegram) ----------
+  // ---------- каналы-ленты ----------
   document.querySelector('.rail-btn[data-view="tg"]').click();
   await tick(50);
   assert.strictEqual(document.getElementById("tg-sidebar").style.display, "block");
@@ -567,10 +567,10 @@ async function run() {
 
   await api.openTgChannel(5);
   await tick(80);
-  assert(screenEl.classList.contains("pane-open"), "канал Telegram открывает панель на телефоне");
+  assert(screenEl.classList.contains("pane-open"), "канал-лента открывает панель на телефоне");
   document.querySelector('[data-action="close-tg"]').click();
   await tick(20);
-  assert(!screenEl.classList.contains("pane-open"), "«назад» из канала Telegram закрывает панель");
+  assert(!screenEl.classList.contains("pane-open"), "«назад» из канала-ленты закрывает панель");
 
   api.setView("chats");
   await tick(30);

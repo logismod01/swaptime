@@ -354,7 +354,7 @@ async function run() {
   await tick(60);
   assert.strictEqual(document.querySelectorAll("#server-channels-list .channel-item").length, 3, "и разворачивается");
 
-  // ---------- 7. реакции на постах Telegram ----------
+  // ---------- 7. реакции на постах каналов-лент ----------
   await api.openTgChannel(3);
   await tick(150);
   const tgChips = document.querySelectorAll("#tg-feed .tg-post .reaction-chip");

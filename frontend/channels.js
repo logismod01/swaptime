@@ -1,5 +1,5 @@
 // ============================================================
-// СВАПТАЙМ — КАНАЛЫ (как в Telegram)
+// СВАПТАЙМ — КАНАЛЫ-ЛЕНТЫ
 // ============================================================
 // Свои каналы и подписки, публикации, поиск публичных каналов.
 // ============================================================
@@ -217,7 +217,7 @@ function renderTgFeed() {
       card.appendChild(el("div", "tg-post-edited", "изменён"));
     }
 
-    // реакции на постах — как в Telegram
+    // реакции на постах канала
     if (!post.deleted && typeof buildReactionsNode === "function") {
       const reactions = buildReactionsNode(post, "tg_post");
       if (reactions) card.appendChild(reactions);

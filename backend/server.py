@@ -110,7 +110,7 @@ FONTS = [
 ]
 
 
-# Presence: как в Discord — в сети / отошёл / не беспокоить / невидимка
+# Presence: в сети / отошёл / не беспокоить / невидимка
 STATUSES = ["online", "idle", "dnd", "invisible"]
 STATUS_TEXT_MAX = 60
 STATUS_LABELS = {
@@ -240,7 +240,7 @@ def init_db() -> None:
         )
     """)
 
-    # ---------- серверы (как в Discord) ----------
+    # ---------- серверы и каналы ----------
     c.execute("""
         CREATE TABLE IF NOT EXISTS servers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -299,7 +299,7 @@ def init_db() -> None:
         )
     """)
 
-    # ---------- Telegram-каналы ----------
+    # ---------- каналы-ленты ----------
     c.execute("""
         CREATE TABLE IF NOT EXISTS tg_channels (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1286,7 +1286,7 @@ async def get_settings(user: str = Depends(auth_user)):
 
 @app.post("/api/presence")
 async def set_presence(data: PresenceIn, user: str = Depends(auth_user)):
-    """Статус как в Discord: в сети / отошёл / не беспокоить / невидимка + текст."""
+    """Статус: в сети / отошёл / не беспокоить / невидимка + текст."""
     current = get_user(user)
     if not current:
         raise HTTPException(401, "Юзер не найден")
@@ -1980,7 +1980,7 @@ async def unignore_user(data: FriendRequest, user: str = Depends(auth_user)):
 
 
 # ============================================
-# СЕРВЕРЫ (как в Discord) — ХЕЛПЕРЫ
+# СЕРВЕРЫ — ХЕЛПЕРЫ
 # ============================================
 def _invite_code() -> str:
     return secrets.token_urlsafe(6).replace("-", "").replace("_", "")[:8]
@@ -2385,7 +2385,7 @@ async def delete_server(server_id: int, user: str = Depends(auth_user)):
 
 @app.get("/api/servers/{server_id}/stats")
 async def server_stats(server_id: int, days: int = Query(default=7, ge=1, le=30), user: str = Depends(auth_user)):
-    """Статистика сервера (как Discord Insights): активность по людям, каналам и дням."""
+    """Статистика сервера: активность по людям, каналам и дням."""
     if not server_role(server_id, user):
         raise HTTPException(403, "Ты не участник этого сервера")
 
@@ -2804,7 +2804,7 @@ async def set_member_role(server_id: int, member: str, data: RoleUpdate, user: s
 
 
 # ============================================
-# API — TELEGRAM-КАНАЛЫ
+# API — КАНАЛЫ-ЛЕНТЫ
 # ============================================
 class TgChannelCreate(BaseModel):
     name: str

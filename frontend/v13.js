@@ -2,15 +2,15 @@
 // СВАПТАЙМ — v13: десять новых функций
 // ============================================================
 // 1. Вложения: фото, голосовые, файлы (личка + каналы серверов)
-// 2. Категории каналов (как в Discord)  — см. servers.js
-// 3. Реакции на постах Telegram-каналов — см. channels.js
+// 2. Категории каналов — см. servers.js
+// 3. Реакции на постах каналов-лент — см. channels.js
 // 4. Глобальный поиск (Ctrl+Shift+F)
-// 5. Опросы (как в Telegram/Discord)
+// 5. Опросы
 // 6. Слэш-команды с подсказками (/spoiler, /me, /shrug, /roll …)
-// 7. Папки чатов (как в Telegram)
+// 7. Папки чатов
 // 8. Мобильная нижняя панель вкладок
 // 9. Онбординг-тур при первом входе
-// 10. Статистика сервера (как Discord Insights)
+// 10. Статистика сервера
 // ============================================================
 
 (function () {
@@ -1020,6 +1020,11 @@
         return allFolders().find((f) => f.id === activeFolder) || DEFAULT_FOLDERS[0];
     }
 
+    function syncFolderVisibility(view) {
+        const bar = document.getElementById("v13-folder-tabs");
+        if (bar) bar.style.display = view === "chats" ? "" : "none";
+    }
+
     function buildFolderTabs() {
         const host = document.querySelector("#home-sidebar .sidebar-scroll");
         if (!host || document.getElementById("v13-folder-tabs")) return;
@@ -1244,7 +1249,7 @@
     const TOUR_STEPS = [
         {
             target: ".rail",
-            title: "Рейл — как в Discord",
+            title: "Рейл — навигация",
             text: "Слева переключаются личные чаты, друзья, каналы и серверы. Красные точки — непрочитанное.",
         },
         {
@@ -1523,6 +1528,7 @@
             buildFolderTabs();
             addStatsButton();
             syncMobileTabs();
+            syncFolderVisibility(state.view);
             if (state.view === "chats") {
                 const list = document.getElementById("users-list");
                 if (list) filterDmList(list);
@@ -1581,6 +1587,7 @@
         openServerStats,
         startTour,
         applySlashText,
+        syncFolderVisibility,
         collapseKey: KEYS.categories,
         sendDirect,
         sendToChannel,

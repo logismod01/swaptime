@@ -1,5 +1,5 @@
 """
-Тесты v10: темы, серверы (как Discord), каналы (как Telegram), звонки.
+Тесты v10: темы, серверы с каналами, каналы-ленты, звонки.
 
 Запуск:
     /home/user/.venv/bin/python -m pytest tests -q
@@ -159,7 +159,7 @@ async def scenario(base: str, ws_url: str):
             assert c.post("/api/servers/join", json={"code": code}, headers=auth(tc)).status_code == 404
             assert c.post("/api/servers/join", json={"code": new_code}, headers=auth(tc)).status_code == 200
 
-            # ---------- Telegram-каналы ----------
+            # ---------- каналы-ленты ----------
             r = c.post("/api/tg/channels", json={
                 "name": "Новости", "description": "всё о сваптайме", "color": "#1e88e5", "is_public": True,
             }, headers=auth(ta))

@@ -1,10 +1,10 @@
 // ============================================================
-// СВАПТАЙМ — FRONTEND (v12, Discord-like)
+// СВАПТАЙМ — FRONTEND (v13)
 // ============================================================
 // Что нового относительно v7:
 //   • своя аватарка (загрузка фото, обрезка в квадрат на клиенте)
 //   • 10 кастомных рамок вокруг аватарки с анимацией
-//   • баннеры профиля, «о себе», карточка профиля как в Discord
+//   • баннеры профиля, «о себе», карточка профиля
 //   • новый интерфейс: рейл, сайдбар, вкладки друзей, настройки с разделами
 //   • сообщения сгруппированы по автору, действия появляются при наведении
 // ============================================================
@@ -717,7 +717,7 @@ function setView(view, options = {}) {
   const titles = {
     chats: ["Личные сообщения", "DM", "Поиск по друзьям…"],
     friends: ["Друзья", "DM", "Найти друга…"],
-    tg: ["Каналы", "TG", "Поиск по каналам…"],
+    tg: ["Каналы", "ЛЕНТА", "Поиск по каналам…"],
     server: ["Сервер", "", "Поиск по каналам…"],
   };
   const [title, tag, placeholder] = titles[view] || titles.chats;
@@ -732,6 +732,7 @@ function setView(view, options = {}) {
 
   renderRail();
   renderSidebar();
+  if (typeof V13 !== "undefined" && V13.syncFolderVisibility) V13.syncFolderVisibility(view);
   if (view === "tg" && typeof renderTgList === "function") renderTgList();
 }
 
@@ -1279,7 +1280,7 @@ function upsertMessage(msg) {
   if (sticky || msg.from === state.user.username) scrollToBottom();
 }
 
-/** Группировка подряд идущих сообщений одного автора (как в Discord) */
+/** Группировка подряд идущих сообщений одного автора */
 function applyGrouping() {
   const nodes = Array.from($("messages").querySelectorAll(".message-wrapper"));
   let prev = null;
@@ -1782,7 +1783,7 @@ function handleSocketMessage(msg) {
       if (typeof handleServerEvent === "function") handleServerEvent(msg);
       break;
 
-    // ---- Telegram-каналы ----
+    // ---- каналы-ленты ----
     case "tg_post":
     case "tg_post_updated":
     case "tg_channel_deleted":
@@ -2665,7 +2666,7 @@ const ACTIONS = {
   "toggle-members": () => toggleMembers(),
   "close-server-chat": () => { setMobilePane(false); },
 
-  // каналы (telegram)
+  // каналы-ленты
   "create-channel": () => openTgModal(),
   "close-tg-modal": () => closeModal("tg-modal"),
   "save-tg-channel": () => saveTgChannel(),

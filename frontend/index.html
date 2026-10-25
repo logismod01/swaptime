@@ -7,7 +7,7 @@
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
     <link rel="manifest" href="/manifest.webmanifest">
     <meta name="theme-color" content="#0b0b12">
-    <meta name="description" content="СвапТайм — мессенджер: чаты, серверы как в Discord, каналы как в Telegram, звонки и демонстрация экрана до 4K.">
+    <meta name="description" content="СвапТайм — свой мессенджер: личные чаты, серверы с каналами, ленты сообществ, звонки и демонстрация экрана до 4K.">
 
     <!-- установка как приложение -->
     <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
@@ -357,7 +357,7 @@
                     </div>
                 </div>
 
-                <!-- КАНАЛ (TELEGRAM) -->
+                <!-- КАНАЛ: ЛЕНТА ПОСТОВ -->
                 <div id="tg-view" class="view-pane" style="display:none;">
                     <header class="chat-header tg-header">
                         <button class="icon-btn back-btn" data-action="close-tg" title="Назад">←</button>
@@ -545,7 +545,7 @@
                     </div>
 
                     <div class="settings-section">
-                        <div class="settings-label">Статус <em>как в Discord</em></div>
+                        <div class="settings-label">Статус <em>в сети · отошёл · не беспокоить · невидимка</em></div>
                         <div class="status-row" id="status-row"></div>
                         <input type="text" id="settings-status-text" placeholder="Что происходит? (необязательно)" maxlength="60">
                     </div>
@@ -688,7 +688,7 @@
     <div id="server-modal" class="modal-overlay">
         <div class="modal-box">
             <h3 id="server-modal-title">Создать сервер</h3>
-            <p class="modal-hint">Сервер — это тусовка с каналами, как в Discord.</p>
+            <p class="modal-hint">Сервер — это тусовка с каналами и участниками.</p>
 
             <div class="emoji-picker" id="server-icon-picker"></div>
             <input type="text" id="server-name-input" placeholder="Название сервера" maxlength="32">
@@ -761,7 +761,7 @@
     </div>
 
     <!-- ============================================
-         МОДАЛКА: СОЗДАТЬ КАНАЛ (TELEGRAM)
+         МОДАЛКА: СОЗДАТЬ КАНАЛ-ЛЕНТУ
          ============================================ -->
     <div id="tg-modal" class="modal-overlay">
         <div class="modal-box">

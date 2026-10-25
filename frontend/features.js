@@ -1,5 +1,5 @@
 // ============================================================
-// СВАПТАЙМ — v12: фичи как в Discord и Telegram
+// СВАПТАЙМ — v12: реакции, поиск, черновики, избранное, статусы
 // ============================================================
 //  1. реакции-эмодзи на сообщения (личка + каналы сервера)
 //  2. поиск по чату/каналу (Ctrl+F) с переходом по совпадениям
@@ -243,7 +243,7 @@ function toggleReaction(msg, emoji, scope) {
   if (!msg || !msg.id) return;
   const effective = reactionScopeOf(msg, scope);
 
-  // посты Telegram-каналов идут только через REST (у WS нет такого scope)
+  // посты каналов-лент идут только через REST (у WS нет такого scope)
   if (effective === "tg_post") {
     api("/api/reactions", {
       method: "POST",
@@ -276,7 +276,7 @@ function findMessageObjectById(id) {
 function applyReactionEvent(msg) {
   if (!msg || !msg.message_id) return;
 
-  // реакции на постах Telegram-каналов
+  // реакции на постах каналов-лент
   if (msg.scope === "tg_post") {
     const post = state.tgData && (state.tgData.posts || []).find((p) => p.id === msg.message_id);
     if (post) {
