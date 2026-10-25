@@ -47,6 +47,7 @@
 
     function shellLooksBroken() {
         if (!document.getElementById("chat-screen")) return false;
+        // нет таблицы style.css вообще (404 / оборванный запрос / пустой кеш)
         if (!stylesheetApplied()) return true;
         const body = getComputedStyle(document.body);
         const app = document.querySelector("#chat-screen .app");
@@ -183,20 +184,31 @@
         }
     }
 
-    // Подгоняем высоту каркаса под реальное окно (страхует от zoom/масштаба)
+    // Масштаб страницы: браузерный зум и CSS-zoom родителей. Считаем явно,
+    // без обратной связи по замерам — иначе коррекция «качается».
+    function pageZoom(el) {
+        let zoom = 1;
+        let node = el;
+        while (node && node.nodeType === 1) {
+            const style = getComputedStyle(node);
+            const own = parseFloat(style.zoom);
+            if (isFinite(own) && own > 0) zoom *= own;
+            node = node.parentElement;
+        }
+        return zoom > 0 && isFinite(zoom) ? zoom : 1;
+    }
+
+    // Подгоняем высоту каркаса под реальное окно (страхует от зума/масштаба)
     function fitToViewport(screen) {
-        for (let i = 0; i < 2; i++) {
-            const rect = screen.getBoundingClientRect();
-            const viewport = window.innerHeight || document.documentElement.clientHeight || 0;
-            if (!viewport || !rect.height) return;
-            const diff = rect.height - viewport;
-            if (Math.abs(diff) <= 1) {
-                if (i === 0) screen.style.removeProperty("height");
-                return;
-            }
-            const scale = rect.height / viewport;
-            if (!isFinite(scale) || scale <= 0) return;
-            const target = Math.round(viewport / scale);
+        const viewport = window.innerHeight || document.documentElement.clientHeight || 0;
+        if (!viewport) return;
+        const zoom = pageZoom(screen);
+        if (Math.abs(zoom - 1) < 0.01) {
+            if (screen.style.getPropertyValue("height")) screen.style.removeProperty("height");
+            return;
+        }
+        const target = Math.round(viewport / zoom);
+        if (screen.style.getPropertyValue("height") !== target + "px") {
             screen.style.setProperty("height", target + "px", "important");
         }
     }

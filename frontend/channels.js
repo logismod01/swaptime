@@ -219,7 +219,7 @@ function renderTgFeed() {
 
     // реакции на постах канала
     if (!post.deleted && typeof buildReactionsNode === "function") {
-      const reactions = buildReactionsNode(post, "tg_post");
+      const reactions = buildReactionsNode(post, "tg_post", true);
       if (reactions) card.appendChild(reactions);
     }
 

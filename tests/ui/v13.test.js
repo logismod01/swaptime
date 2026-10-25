@@ -53,6 +53,8 @@ const CHANNEL_MESSAGES = [
 const TG_POSTS = [
   { id: 91, channel_id: 3, author: "alice", text: "Пост с реакцией", edited: 0, deleted: 0,
     created_at: 1700000600, reactions: [{ emoji: "🔥", count: 2, users: ["alice", "bob"] }] },
+  { id: 92, channel_id: 3, author: "alice", text: "Пост без реакций", edited: 0, deleted: 0,
+    created_at: 1700000700, reactions: [] },
 ];
 
 const requests = [];
@@ -234,7 +236,16 @@ async function run() {
   if (screen.classList.contains("active")) {
     assert.strictEqual(screen.style.getPropertyValue("position"), "fixed", "каркас зафиксирован");
     assert.strictEqual(screen.style.getPropertyPriority("overflow"), "important", "overflow задан жёстко");
+    // без зума высоту не фиксируем: лишний inline-размер — источник «уехавшей» раскладки
+    assert.strictEqual(screen.style.getPropertyValue("height"), "", "высота каркаса не зажата без зума");
   }
+  const messagesBox = document.querySelector(".messages");
+  if (messagesBox) {
+    assert.strictEqual(messagesBox.style.getPropertyPriority("overflow-y"), "important", "лента сообщений прокручивается сама");
+  }
+  const guardSrc = fs.readFileSync(ROOT + "/frontend/layout-guard.js", "utf8");
+  assert(guardSrc.includes("pageZoom(") && guardSrc.includes("fitToViewport("), "компенсация зума на месте");
+  assert(guardSrc.includes("style.css?repair="), "самолечение CSS на месте");
 
   // ---------- 1. вложения ----------
   await api.openChat("bob");
@@ -360,6 +371,11 @@ async function run() {
   const tgChips = document.querySelectorAll("#tg-feed .tg-post .reaction-chip");
   assert(tgChips.length >= 1, "реакции на посте отрисованы");
   assert.strictEqual(document.querySelector("#tg-feed .reaction-emoji").textContent, "🔥");
+  assert.strictEqual(document.querySelectorAll("#tg-feed .tg-post").length, 2, "два поста в ленте");
+  assert.strictEqual(
+    document.querySelectorAll("#tg-feed .tg-post .reaction-chip.reaction-add").length, 2,
+    "кнопка «＋» есть даже у поста без реакций"
+  );
   document.querySelector("#tg-feed .reaction-chip.reaction-add").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   await tick(40);
   assert(document.querySelector(".reaction-picker"), "пикер реакций открылся");

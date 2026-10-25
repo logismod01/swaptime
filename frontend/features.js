@@ -124,10 +124,11 @@ function reactionScopeOf(msg, scope) {
   return "dm";
 }
 
-function buildReactionsNode(msg, scope) {
+function buildReactionsNode(msg, scope, always) {
   const list = Array.isArray(msg.reactions) ? msg.reactions : [];
   // пустой контейнер не рисуем — иначе под каждым сообщением висит пустая строка
-  if (!list.length) return null;
+  // (кроме постов каналов-лент: там нужна кнопка «＋», чтобы начать реакцию)
+  if (!list.length && !always) return null;
 
   const box = el("div", "reactions");
   box.dataset.reactionsFor = String(msg.id || "");
