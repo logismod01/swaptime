@@ -3,18 +3,14 @@
 // ============================================================
 // Стратегии:
 //   • навигация (HTML)  — сеть, при офлайне из кеша;
-//   • статика (/static) — stale-while-revalidate;
+//   • статика (/static) — сначала сеть, кеш только как офлайн-запас
+//     (иначе после обновления люди видят старый CSS и «сломанную» раскладку);
 //   • API и WebSocket   — только сеть (никакого кеша: приватные данные).
 // ============================================================
 
-const VERSION = "swaptime-v11";
+const VERSION = "swaptime-v13.1";
 const SHELL = [
   "/",
-  "/static/style.css?v=10",
-  "/static/script.js?v=10",
-  "/static/servers.js?v=10",
-  "/static/channels.js?v=10",
-  "/static/calls.js?v=10",
   "/static/favicon.svg",
   "/static/icons/icon-192.png",
   "/static/icons/icon-512.png",
@@ -64,20 +60,17 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // статика — из кеша, параллельно обновляем
+  // статика — сначала сеть, кеш только если сети нет
   event.respondWith(
-    caches.match(request).then((cached) => {
-      const network = fetch(request)
-        .then((response) => {
-          if (response && response.ok) {
-            const copy = response.clone();
-            caches.open(VERSION).then((cache) => cache.put(request, copy)).catch(() => {});
-          }
-          return response;
-        })
-        .catch(() => cached);
-      return cached || network;
-    })
+    fetch(request)
+      .then((response) => {
+        if (response && response.ok) {
+          const copy = response.clone();
+          caches.open(VERSION).then((cache) => cache.put(request, copy)).catch(() => {});
+        }
+        return response;
+      })
+      .catch(() => caches.match(request))
   );
 });
 
